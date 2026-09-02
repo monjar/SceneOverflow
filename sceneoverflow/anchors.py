@@ -177,6 +177,35 @@ class Transcript:
         a, b = self.find(start_phrase), self.find(end_phrase)
         return Span(a.start, b.end, f"{start_phrase}..{end_phrase}")
 
+    def cues(self, max_words: int = 8, max_duration: float = 4.0, max_gap: float = 1.0) -> list[Span]:
+        """Group words into caption cues (label = the cue text)."""
+        out, cur = [], []
+        for w in self.words:
+            if cur and (len(cur) >= max_words or w.end - cur[0].start > max_duration or w.start - cur[-1].end > max_gap
+                        or cur[-1].text.endswith((".", "!", "?"))):
+                out.append(Span(cur[0].start, cur[-1].end, " ".join(x.text for x in cur)))
+                cur = []
+            cur.append(w)
+        if cur:
+            out.append(Span(cur[0].start, cur[-1].end, " ".join(x.text for x in cur)))
+        return out
+
+    def to_srt(self, path: str | Path | None = None, **cue_opts) -> str:
+        """SubRip text (and write it to ``path`` if given)."""
+        def ts(t: float) -> str:
+            ms = int(round(t * 1000))
+            h, ms = divmod(ms, 3600_000)
+            m, ms = divmod(ms, 60_000)
+            s, ms = divmod(ms, 1000)
+            return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+        lines = []
+        for i, c in enumerate(self.cues(**cue_opts), 1):
+            lines += [str(i), f"{ts(c.start)} --> {ts(max(c.end, c.start + 0.3))}", c.label or "", ""]
+        text = "\n".join(lines)
+        if path:
+            Path(path).write_text(text)
+        return text
+
     def to_list(self) -> list[dict]:
         return [{"text": w.text, "start": w.start, "end": w.end} for w in self.words]
 

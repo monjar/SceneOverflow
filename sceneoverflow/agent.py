@@ -150,7 +150,10 @@ Times: seconds, "12s", "500ms", "1:23.5", "120f", a TimeRef, or a Span.
 
 Clip (video/audio):
   .trim(start, end=None) .split_at(*t) / .cut(*t) -> Sequence   .remove(*spans) .keep(*spans)
-  .head(d) .tail(d)   a + b (concat)   .speed(f)   .fade_in(d) .fade_out(d) .fade(d)   .volume(g)
+  .head(d) .tail(d)   a + b (concat)   .loop(n)   .freeze(at, d)   .still(at) -> image
+  .speed(f)   .fade_in(d) .fade_out(d) .fade(d)   .volume(g) .mute() .normalize(lufs=-16)
+  .crop(aspect="9:16", anchor="center")   .subtitles(srt_path_or_transcript, style=None)   .captions()
+  .crossfade(other, d, transition="fade")
   .with_audio(sound, at=0, mode="mix"|"replace"|"duck", gain=1) / .dub(sound)
   .overlay(image_or_video, at=0, for_=None, pos="top-right"|(x,y), width=None, scale=None, opacity=1, audio=False)
   .pip(video, at, pos="bottom-right", scale=0.3, audio=False)   .beside(other) .above(other)
@@ -159,6 +162,7 @@ Clip (video/audio):
 Anchors: .marks["name"] (source clips) .silences(min_len, threshold_db) .scenes(threshold)
          .words() -> Transcript with .find("phrase") -> Span, .between(a, b)
 Image clip: .as_clip("3s")   picture on picture: img.overlay(img2, pos, scale, opacity) -> image
-Sequence: [i] .get(i) .drop(*i) / .delete(*i) .keep(*i) .map(fn) .join()
-Output: .describe() .to_json() .render(path) .preview() .frame_at(t) .timeline_png(path)
+Sequence: [i] .get(i) .drop(*i) / .delete(*i) .keep(*i) .map(fn) .join(transition=None, duration="0.5s")
+Generated (edit(..., project=project) to get it): project.blank("1s", "black")  project.title("Text", "3s")
+Output: .describe() .to_json() .render(path: .mp4/.webm/.gif/.wav/.png) .preview() .frame_at(t) .timeline_png(path)
 """

@@ -98,7 +98,7 @@ class Renderer:
         self.stats.rendered.append(node.hash)
         return out
 
-    def export(self, node: Node, out_path: str | Path) -> Path:
+    def export(self, node: Node, out_path: str | Path, **kw) -> Path:
         """Render then encode a delivery file (normal GOP, faststart)."""
         src = self.render(node)
         out_path = Path(out_path)
@@ -115,6 +115,17 @@ class Renderer:
             return out_path
         if node.kind == IMAGE:
             shutil.copyfile(src, out_path)
+            return out_path
+        ext = out_path.suffix.lower()
+        if ext == ".gif":
+            fps, width = int(kw.get("fps", 12)), int(kw.get("width", 480))
+            fc = (f"[0:v]fps={fps},scale={width}:-2:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];"
+                  f"[b][p]paletteuse=dither=bayer:bayer_scale=5")
+            ffmpeg.run(["-i", src, "-filter_complex", fc, "-loop", "0", out_path])
+            return out_path
+        if ext == ".webm":
+            ffmpeg.run(["-i", src, "-c:v", "libvpx-vp9", "-crf", "32", "-b:v", "0", "-row-mt", "1",
+                        "-c:a", "libopus", "-b:a", "128k", out_path])
             return out_path
         ffmpeg.run([
             "-i", src, "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p",
@@ -303,6 +314,67 @@ class Renderer:
               f"[0:a]apad[a0];[1:a]apad[a1];[a0][a1]amix=inputs=2:duration=longest:normalize=0[a]")
         ffmpeg.run(["-i", inputs[0], "-i", inputs[1], "-filter_complex", fc, "-map", "[v]", "-map", "[a]",
                     "-t", f"{dur:.6f}", *self._venc(), *self._aenc(), out])
+
+    def _op_xfade(self, node: Node, inputs, out: Path) -> None:
+        """N clips joined with a transition between each pair (single encode)."""
+        p = node.params
+        d, tr = float(p["duration"]), p["transition"]
+        durs = [i.duration for i in node.inputs]
+        parts, vprev, aprev, acc = [], "[0:v]", "[0:a]", durs[0]
+        for k in range(1, len(inputs)):
+            off = acc - d
+            parts.append(f"{vprev}[{k}:v]xfade=transition={tr}:duration={d:.3f}:offset={off:.3f}[v{k}]")
+            parts.append(f"{aprev}[{k}:a]acrossfade=d={d:.3f}[a{k}]")
+            vprev, aprev = f"[v{k}]", f"[a{k}]"
+            acc += durs[k] - d
+        args = []
+        for i in inputs:
+            args += ["-i", i]
+        ffmpeg.run(args + ["-filter_complex", ";".join(parts), "-map", vprev, "-map", aprev,
+                           *self._venc(), *self._aenc(), out])
+
+    def _op_color(self, node: Node, inputs, out: Path) -> None:
+        p = node.params
+        d = float(p["duration"])
+        pr = self.profile
+        ffmpeg.run(["-f", "lavfi", "-i", f"color=c={p['color']}:size={pr.width}x{pr.height}:rate={pr.fps}:d={d:.3f}",
+                    "-f", "lavfi", "-i", f"anullsrc=r={pr.sample_rate}:cl=stereo", "-t", f"{d:.3f}",
+                    "-map", "0:v:0", "-map", "1:a:0", "-vf", "format=yuv420p", *self._venc(), *self._aenc(), out])
+
+    def _op_loudnorm(self, node: Node, inputs, out: Path) -> None:
+        p = node.params
+        af = f"loudnorm=I={float(p['lufs']):.1f}:TP=-1.5:LRA=11"
+        args = ["-i", inputs[0], "-af", af, "-ar", str(self.profile.sample_rate)]
+        args += self.profile.wav_args() if node.kind == AUDIO else ["-c:v", "copy", *self._aenc()]
+        ffmpeg.run(args + [out])
+
+    def _op_crop(self, node: Node, inputs, out: Path) -> None:
+        p = node.params
+        W, H = self._dims(inputs[0])
+        if p.get("aspect"):
+            aw, ah = p["aspect"]
+            w = min(W, int(H * aw / ah))
+            h = min(H, int(W * ah / aw))
+            w, h = max(2, w // 2 * 2), max(2, h // 2 * 2)
+            fx, fy = p.get("anchor", (0.5, 0.5))
+            x, y = int((W - w) * fx), int((H - h) * fy)
+        else:
+            x, y, w, h = (int(p[k]) for k in ("x", "y", "w", "h"))
+        ffmpeg.run(["-i", inputs[0], "-vf", f"crop={w}:{h}:{x}:{y},setsar=1", *self._venc(), "-c:a", "copy", out])
+
+    def _op_still(self, node: Node, inputs, out: Path) -> None:
+        t = float(node.params["at"])
+        ffmpeg.run(["-ss", f"{t:.3f}", "-i", inputs[0], "-frames:v", "1", out])
+
+    def _op_subtitles(self, node: Node, inputs, out: Path) -> None:
+        p = node.params
+        if not ffmpeg.has_filter("subtitles"):
+            raise ffmpeg.RenderError(["ffmpeg"], "this ffmpeg build lacks the subtitles filter (needs libass)")
+        path = str(p["path"]).replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
+        vf = f"subtitles='{path}'"
+        if p.get("style"):
+            vf += ":force_style='" + str(p["style"]).replace("'", "\\'") + "'"
+        ffmpeg.run(["-i", inputs[0], "-vf", vf, *self._venc(), "-c:a", "copy", out])
 
     def _op_speed(self, node: Node, inputs, out: Path) -> None:
         f = float(node.params["factor"])

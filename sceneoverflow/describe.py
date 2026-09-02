@@ -56,10 +56,44 @@ def segments(node: Node) -> list[Segment]:
     op = node.op
     if op == "source":
         track = "audio" if node.kind == AUDIO else "video"
+        if node.kind == IMAGE:
+            return [Segment("video", 0.0, 0.0, os.path.basename(p["path"]), None, None, 1.0, w)]
         return [Segment(track, 0.0, node.duration, os.path.basename(p["path"]), 0.0, node.duration, 1.0, w)]
     if op == "image_clip":
-        return [Segment("video", 0.0, node.duration, os.path.basename(node.inputs[0].params["path"]), None, None,
-                        1.0, w, "still")]
+        inner = segments(node.inputs[0])
+        src = inner[0] if inner else None
+        label = src.source if src else "image"
+        ss = src.src_start if src and src.src_start is not None and node.inputs[0].op == "still" else None
+        return [Segment("video", 0.0, node.duration, label, ss, ss, 1.0, w, "still")]
+    if op == "still":
+        inner = [x for x in segments(node.inputs[0]) if x.track == "video"]
+        t = float(p["at"])
+        hit = next((x for x in inner if x.out_start <= t <= x.out_end), inner[0] if inner else None)
+        if hit and hit.src_start is not None:
+            st = hit.src_start + (t - hit.out_start) * hit.rate
+            return [Segment("video", 0.0, 0.0, hit.source, st, st, 1.0, w, "frame")]
+        return [Segment("video", 0.0, 0.0, hit.source if hit else "frame", None, None, 1.0, w, "frame")]
+    if op == "color":
+        return [Segment("video", 0.0, node.duration, f"color:{p['color']}", None, None, 1.0, w, "generated")]
+    if op == "xfade":
+        d = float(p["duration"])
+        out, t = [], 0.0
+        for k, i in enumerate(node.inputs):
+            if k:
+                t -= d
+                out.append(Segment("fx", t, t + d, f"{p['transition']} transition", None, None, 1.0, w))
+            out.extend(_shift(segments(i), t))
+            t += i.duration
+        return out
+    if op == "loudnorm":
+        return segments(node.inputs[0]) + [Segment("fx", 0.0, node.duration, f"normalize {p['lufs']:g} LUFS", None,
+                                                   None, 1.0, w)]
+    if op == "crop":
+        what = f"crop {p['aspect'][0]:g}:{p['aspect'][1]:g}" if p.get("aspect") else f"crop {p['w']}x{p['h']}"
+        return segments(node.inputs[0]) + [Segment("fx", 0.0, node.duration, what, None, None, 1.0, w)]
+    if op == "subtitles":
+        return segments(node.inputs[0]) + [Segment("text", 0.0, node.duration, os.path.basename(p["path"]), None,
+                                                   None, 1.0, w, "subtitles")]
     if op == "audio_of":
         return [Segment("audio", s.out_start, s.out_end, s.source, s.src_start, s.src_end, s.rate, s.where, s.note)
                 for s in segments(node.inputs[0])]

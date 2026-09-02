@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sceneoverflow"
+version = "0.1.0"
+description = "Code-first video editor for programmers and LLM agents. Edits are scripts, times are anchors, rendering is a cached op graph on top of ffmpeg."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = []
+
+[project.optional-dependencies]
+png = ["pillow>=9"]
+whisper = ["faster-whisper>=1.0"]
+mcp = ["mcp>=1.0"]
+dev = ["pytest>=7", "pillow>=9"]
+
+[project.scripts]
+sceneoverflow = "sceneoverflow.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["sceneoverflow*"]
+
+[tool.pytest.ini_options]
+markers = ["ffmpeg: needs ffmpeg/ffprobe on PATH"]
+testpaths = ["tests"]

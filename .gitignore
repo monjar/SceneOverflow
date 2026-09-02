@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.sceneoverflow/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+examples/out/

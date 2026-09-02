@@ -129,6 +129,8 @@
   function loadPreview(url) {
     const wasPlaying = !video.paused && !video.ended;
     pendingTime = video.currentTime || 0;
+    // a real frame while the new file loads (and if the browser cannot decode H.264 at all)
+    video.poster = `/api/frame?t=${pendingTime.toFixed(3)}s&w=640&r=${state.run_id}`;
     video.src = url;
     if (wasPlaying) video.play().catch(() => {});
   }
@@ -214,7 +216,9 @@
   }
   canvas.addEventListener('mousemove', ev => {
     const s = hit(ev); if (s !== hoverSeg) { hoverSeg = s; renderGutter(); draw(); }
-    if (s) { tip.style.display = 'block'; tip.style.left = (ev.offsetX + 14) + 'px'; tip.style.top = (ev.offsetY + 14) + 'px';
+    if (s) { tip.style.display = 'block'; tip.style.top = (ev.offsetY + 14) + 'px';
+      const flip = ev.offsetX > canvas.clientWidth * 0.6;
+      tip.style.left = flip ? '' : (ev.offsetX + 14) + 'px'; tip.style.right = flip ? (canvas.clientWidth - ev.offsetX + 14) + 'px' : '';
       tip.textContent = `${s.track}  ${fmt(s.out_start)}-${fmt(s.out_end)}\n${s.source}` +
         (s.src_start != null ? ` [${fmt(s.src_start)}-${fmt(s.src_end)}]${Math.abs(s.rate - 1) > 1e-6 ? ' x' + s.rate : ''}` : '') +
         (s.note ? `\n${s.note}` : '') + `\n→ ${s.where}`; }

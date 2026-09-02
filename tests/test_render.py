@@ -1,0 +1,183 @@
+import json
+from pathlib import Path
+
+import pytest
+
+from sceneoverflow import EditError, Span, edit, run_script
+from tests.conftest import probe_dims, probe_duration
+
+pytestmark = pytest.mark.ffmpeg
+
+
+def test_media_lists(shared_project):
+    p = shared_project
+    assert p.videos.names == ["a_intro.mp4", "b_scenes.mp4", "c_gap.mp4"]
+    assert p.sounds.names == ["music.mp3"]
+    assert p.pictures.names == ["logo.png"]
+    assert p.videos[0].duration == pytest.approx(30.0, abs=0.1)
+    assert p.videos["b_scenes"].duration == pytest.approx(10.0, abs=0.1)
+    assert p.profile.fps == 25.0
+
+
+def test_user_example_cut_delete_join(shared_project, tmp_path):
+    v = shared_project.videos.get(0)
+    parts = v.cut("12s", "14s")
+    assert len(parts) == 3
+    assert [round(c.duration, 3) for c in parts] == [12.0, 2.0, pytest.approx(v.duration - 14.0, abs=0.01)]
+    joined = parts.delete(1).join()
+    assert joined.duration == pytest.approx(v.duration - 2.0, abs=0.01)
+    assert joined.node.hash == v.remove(("12s", "14s")).node.hash  # same graph, same hash
+    out = joined.render(tmp_path / "out.mp4")
+    assert probe_duration(out) == pytest.approx(v.duration - 2.0, abs=0.15)
+    assert probe_dims(out) == (640, 360)
+
+
+def test_cache_hits_and_dirty_rerender(shared_project, tmp_path):
+    r = shared_project.renderer
+    v = shared_project.videos[0]
+    a = v.remove(("12s", "14s"))
+    r.render(a.node)
+    r.stats.reset()
+    r.render(a.node)
+    assert r.stats.hit_rate == 1.0
+    r.stats.reset()
+    b = v.remove(("12s", "15s"))  # move one cut point
+    r.render(b.node)
+    # first trim [0,12) is shared and cached; second trim and the concat re-render
+    assert len(r.stats.rendered) == 2
+    assert len(r.stats.cached) >= 1
+
+
+def test_with_audio_overlay_fade_text(shared_project, tmp_path):
+    p = shared_project
+    v = p.videos[0].head("6s")
+    music = p.sounds.join()
+    v = v.with_audio(music, at="1s", mode="mix", gain=0.5)
+    v = v.overlay(p.pictures[0], at="1s", for_="2s", pos="top-right")
+    v = v.text("hello", at="0.5s", for_="1s", pos="bottom", box="black@0.5")
+    v = v.fade_in("0.5s").fade_out("0.5s")
+    assert v.duration == pytest.approx(6.0)
+    out = v.render(tmp_path / "fx.mp4")
+    assert probe_duration(out) == pytest.approx(6.0, abs=0.15)
+    desc = v.describe()
+    assert "overlay" in desc and "logo.png" in desc and "music.mp3" in desc and "'hello'" in desc
+    assert "fade in" in desc and "fade out" in desc
+    js = v.to_json()
+    assert js["duration"] == pytest.approx(6.0)
+    assert {s["track"] for s in js["segments"]} == {"video", "audio", "overlay", "text", "fx"}
+    json.dumps(js)  # serializable
+
+
+def test_replace_and_duck_modes(shared_project, tmp_path):
+    p = shared_project
+    v = p.videos[0].head("3s")
+    for mode in ("replace", "duck"):
+        out = v.with_audio(p.sounds[0], mode=mode).render(tmp_path / f"{mode}.mp4")
+        assert probe_duration(out) == pytest.approx(3.0, abs=0.15)
+
+
+def test_video_without_audio_gets_silence_and_concats(shared_project, tmp_path):
+    p = shared_project
+    v = p.videos["b_scenes"].head("2s") + p.videos["a_intro"].head("2s")
+    out = v.render(tmp_path / "mixed.mp4")
+    assert probe_duration(out) == pytest.approx(4.0, abs=0.15)
+
+
+def test_speed_and_image_clip_and_audio_extract(shared_project, tmp_path):
+    p = shared_project
+    fast = p.videos[0].head("4s").speed(2)
+    assert fast.duration == pytest.approx(2.0)
+    assert probe_duration(fast.render(tmp_path / "fast.mp4")) == pytest.approx(2.0, abs=0.15)
+    still = p.pictures[0].as_clip("1.5s")
+    assert probe_duration(still.render(tmp_path / "still.mp4")) == pytest.approx(1.5, abs=0.15)
+    a = p.videos[0].head("2s").audio
+    assert a.kind == "audio"
+    assert probe_duration(a.render(tmp_path / "a.wav")) == pytest.approx(2.0, abs=0.05)
+    seq = p.pictures.map(lambda i: i.as_clip("1s")).join()
+    assert seq.duration == 1.0
+
+
+def test_silences_and_scenes(shared_project):
+    p = shared_project
+    sil = p.videos["c_gap"].silences(min_len="1s")
+    assert len(sil) == 1
+    assert sil[0].start == pytest.approx(4.0, abs=0.3)
+    assert sil[0].end == pytest.approx(7.0, abs=0.3)
+    tight = p.videos["c_gap"].remove(*sil)
+    assert tight.duration == pytest.approx(9.0, abs=0.5)
+    scenes = p.videos["b_scenes"].scenes()
+    assert len(scenes) == 1
+    assert float(scenes[0]) == pytest.approx(5.0, abs=0.1)
+    # anchors on a derived clip are in the derived clip's own time
+    later = p.videos["c_gap"].trim("2s")
+    s2 = later.silences(min_len="1s")
+    assert s2[0].start == pytest.approx(2.0, abs=0.3)
+
+
+def test_markers(shared_project, media_dir):
+    v = shared_project.videos[0]
+    v.marks.set("intro_end", "3s")
+    v.marks.set("outro", "10s")
+    assert (media_dir / "a_intro.mp4.marks.json").exists()
+    assert float(v.marks["intro_end"]) == 3.0
+    assert v.marks.span("intro_end", "outro") == Span(3.0, 10.0, "intro_end..outro")
+    with pytest.raises(KeyError, match="sceneoverflow mark"):
+        v.marks["nope"]
+    clip = v.trim(v.marks["intro_end"], v.marks["outro"] + "1s")
+    assert clip.duration == pytest.approx(8.0)
+    with pytest.raises(EditError):
+        clip.marks
+
+
+def test_errors(shared_project):
+    p = shared_project
+    with pytest.raises(EditError, match="past the end"):
+        p.videos[0].trim("5s", "999s")
+    with pytest.raises(EditError, match="mixed"):
+        from sceneoverflow import Sequence
+        Sequence([p.videos[0], p.sounds[0]], p).join()
+    with pytest.raises(EditError, match="delete all"):
+        p.videos[0].remove((0, "30s"))
+    with pytest.raises(IndexError, match="out of range"):
+        p.videos[7]
+    with pytest.raises(EditError, match="as_clip"):
+        p.pictures.join()
+
+
+def test_run_script_end_to_end(media_dir, tmp_path):
+    script = tmp_path / "edit.py"
+    script.write_text(
+        "from sceneoverflow import edit\n\n"
+        "@edit\n"
+        "def edit(videos, sounds, pictures):\n"
+        "    v = videos.get(0).cut('12s', '14s').delete(1).join()\n"
+        "    fullsound = sounds.join()\n"
+        "    return v.dub(fullsound).overlay(pictures[0], at='1s', for_='2s')\n"
+    )
+    res = run_script(script, media=media_dir, out=tmp_path / "out.mp4", cache_dir=tmp_path / "cache")
+    assert res["out"] and Path(res["out"]).exists()
+    assert probe_duration(res["out"]) == pytest.approx(28.0, abs=0.15)
+    desc = res["clip"].describe()
+    assert "edit.py:5" in desc and "edit.py:7" in desc
+    # second run is all cache hits
+    res2 = run_script(script, media=media_dir, out=tmp_path / "out2.mp4", cache_dir=tmp_path / "cache")
+    assert res2["stats"].hit_rate == 1.0
+
+
+def test_final_mode_uses_source_resolution(media_dir, tmp_path):
+    from sceneoverflow import Project
+    p = Project(media_dir, cache_dir=tmp_path / "cache", mode="final")
+    out = p.videos[0].head("1s").render(tmp_path / "final.mp4")
+    assert probe_dims(out) == (320, 240)
+
+
+def test_timeline_png(shared_project, tmp_path):
+    pytest.importorskip("PIL")
+    v = shared_project.videos[0].remove(("12s", "14s")).with_audio(shared_project.sounds[0])
+    out = v.timeline_png(str(tmp_path / "tl.png"))
+    assert Path(out).stat().st_size > 1000
+
+
+def test_notebook_html(shared_project):
+    html = shared_project.videos[0].head("1s")._repr_html_()
+    assert "<video" in html and "data:video/mp4;base64" in html and "timeline" in html

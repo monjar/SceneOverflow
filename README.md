@@ -150,6 +150,26 @@ A video on top starts playing at `at` and runs for its own length unless `for_` 
 otherwise. Overlays re-encode their span, so put them on the trimmed piece that needs
 them rather than on the whole timeline while iterating.
 
+## Assembling: transitions, titles, freezes, vertical cuts
+
+```python
+from sceneoverflow import edit, Sequence
+
+@edit
+def edit(videos, sounds, pictures, project):
+    intro = project.title("Field notes, day 3", "2.5s", bg="0x101418")
+    a, b, c = videos["a"], videos["b"], videos["c"]
+    body = Sequence([a, b, c], project).join(transition="dissolve", duration="0.7s")
+    body = body.freeze(body.duration - 0.05, "1.5s")          # hold the last frame
+    full = (intro + body).normalize().subtitles("media/talk.srt")
+    full.render("out.mp4")
+    return full.crop("9:16").render("short.mp4")               # same edit, vertical, for phones
+```
+
+Transitions are one ffmpeg pass for the whole sequence, whatever its length. `crop`
+changes the frame size, so it goes last, or on every piece before a join. `normalize`
+targets -16 LUFS by default, which is what podcast and video platforms expect.
+
 ## Seeing the edit
 
 **Text and JSON.** `clip.describe()` prints the table above; `clip.to_json()` returns
@@ -174,8 +194,10 @@ re-rendered only the second piece, the concat, and the pixel ops downstream of i
 preview and the timeline. Save (Ctrl/Cmd+S) re-runs the script and pushes the new
 timeline and video to the page over Server-Sent Events. The link between code and
 picture goes both ways: hover a segment and the line that made it lights up in the
-gutter; click a gutter line and its segments light up on the timeline. Click the
-timeline to seek. "copy source time" copies the *source file* time under the playhead
+gutter; double-click a segment to jump the editor to that line; click a gutter line and
+its segments light up on the timeline. The video lane carries frames of the *output*
+under the segments. Click the timeline to seek; "insert at cursor" drops the playhead
+time into the script as a literal. "copy source time" copies the *source file* time under the playhead
 as a literal; "mark…" writes a named marker into the source's sidecar so the script
 can say `.marks["name"]` instead. A failed run shows the error and marks the failing
 line red. The editor highlights Python and the time literals inside strings. Stdlib only:
@@ -249,6 +271,11 @@ Clip (video or audio unless noted):
 | `remove(*spans)`, `keep(*spans)` | delete or keep ranges, joined; spans are `Span` or `(start, end)` |
 | `head(d)`, `tail(d)` | first or last `d` |
 | `a + b` | concatenate |
+| `crossfade(b, d="0.5s", transition="fade")`, `Sequence.join(transition=..., duration=...)` | any ffmpeg xfade transition between cuts; the result is shorter by `d` per cut |
+| `freeze(at, d)`, `still(at)`, `loop(n)` | hold a frame, grab a frame as an image, repeat |
+| `crop(aspect="9:16", anchor="center")`, `crop(x=, y=, w=, h=)` | vertical or square cuts; changes the frame size, so crop last |
+| `normalize(lufs=-16)`, `mute()` | loudness to a broadcast level (EBU R128), or silence |
+| `subtitles(srt_or_transcript, style=None)`, `captions()` | burn subtitles from a file, a transcript, or whisper |
 | `with_audio(sound, at=0, mode="mix"/"replace"/"duck", gain=1)`, `dub(...)` | add a sound; output keeps the clip's duration |
 | `overlay(top, at=0, for_=None, pos="top-right", width=None, scale=None, opacity=1, audio=False)` | image or video on top; `pos` is a name or `(x, y)`; a video top plays from `at`, `audio=True` mixes its sound |
 | `pip(video, at=0, pos="bottom-right", scale=0.3)` | picture-in-picture, sized as a fraction of the frame |
@@ -259,7 +286,10 @@ Clip (video or audio unless noted):
 | `as_clip(d)` (image) | a still video of duration `d` |
 | `overlay(other_image, ...)` (image) | picture on picture, yields an image |
 | `marks`, `silences()`, `scenes()`, `words()` | anchors |
-| `describe()`, `to_json()`, `timeline_png(path)`, `render(path)`, `preview()`, `frame_at(t)`, `thumbnails()` | output |
+| `describe()`, `to_json()`, `timeline_png(path)`, `render(path)`, `preview()`, `frame_at(t)`, `thumbnails()` | output; `render` picks the container from the extension: `.mp4`, `.webm`, `.gif` (`fps=`, `width=`), `.wav`, `.mp3`, `.png` |
+
+Generated clips, from the project (`def edit(videos, sounds, pictures, project)` receives it):
+`project.blank("1s", "black")` and `project.title("Chapter 1", "3s", size=56, bg="black")`.
 
 Sequence: `[i]`, `get(i)`, `drop(*i)` / `delete(*i)`, `keep(*i)`, `map(fn)`, `join()`.
 `videos`, `sounds`, `pictures` are sequences indexed by number or by (partial) file name.
@@ -309,7 +339,7 @@ DESIGN.md         the original plan and what changed while building it
 
 ```
 pip install -e '.[dev]'
-pytest                       # 61 tests, ~2.5 min; needs ffmpeg
+pytest                       # 65 tests, ~2-3 min; needs ffmpeg
 pytest -m "not ffmpeg"       # pure-python tests only
 ```
 

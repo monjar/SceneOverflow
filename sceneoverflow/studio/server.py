@@ -263,6 +263,13 @@ class _Handler(BaseHTTPRequestHandler):
                 if not out.exists():
                     clip.frame_at(min(t, max(0.0, clip.duration - 0.05)), str(out), width)
                 return self._send_file(out, "image/jpeg")
+            if u.path == "/api/thumbs":
+                count = max(4, min(60, int(q.get("n", ["24"])[0])))
+                clip = s.clip()
+                out = s.studio_dir / f"thumbs-{clip.node.hash}-{count}.png"
+                if not out.exists():
+                    clip.thumbnails(str(out), count=count, width=96)
+                return self._send_file(out, "image/png")
             if u.path == "/media/preview.mp4":
                 return self._send_file(s.preview_path, "video/mp4")
             if u.path == "/events":

@@ -120,3 +120,9 @@ def test_cli_studio_help():
     from sceneoverflow.cli import build_parser
     a = build_parser().parse_args(["studio", "x.py", "--port", "0", "--no-open"])
     assert a.port == 0 and a.no_open
+
+
+def test_thumbs_endpoint(studio):
+    _wait_state(studio.url, lambda s: s["ok"])
+    code, hdr, body = _get(studio.url + "api/thumbs?n=6")
+    assert code == 200 and hdr["Content-Type"] == "image/png" and body[:8] == b"\x89PNG\r\n\x1a\n"

@@ -11,6 +11,8 @@ content-addressed cache. Read `README.md` for the user view and `DESIGN.md` for 
 - Layout: `sceneoverflow/clip.py` is the public API, `render/renderer.py` has one method per
   op, `describe.py` turns a graph into segments, `studio/` is the browser UI (stdlib server +
   one vanilla-JS page), `agent.py` + `mcp_server.py` are the tools for LLM agents.
+- Ops available today: source, image_clip, audio_of, trim, concat, xfade, with_audio, volume,
+  loudnorm, overlay, beside, speed, fade, resize, text, subtitles, crop, still, color.
 - Adding an op: `graph.duration_of`, a `Clip` method, `Renderer._op_<name>`, a branch in
   `describe.segments`, a test in `tests/test_render.py` against the synthetic fixtures in
   `tests/conftest.py`.

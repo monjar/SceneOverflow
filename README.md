@@ -131,6 +131,25 @@ $ sceneoverflow mark media/talk.mp4 --at 1:02.5 --name outro   # by hand
 $ sceneoverflow mark media/talk.mp4 -i                         # opens mpv; type `m outro` while it plays
 ```
 
+## Compositing
+
+Anything can go on top of anything: a logo on a talk, a talk in the corner of a screen
+recording, two takes side by side, a watermark on a still.
+
+```python
+screen = videos["screen"]
+face = videos["webcam"]
+v = screen.pip(face, at="2s", scale=0.25, pos="bottom-right", audio=True)  # face cam from 2s, its mic mixed in
+v = v.overlay(pictures["logo"], pos="top-left", width=120, opacity=0.6)     # translucent watermark, whole length
+v = v.overlay(videos["broll"], at="10s", for_="4s", pos="center", scale=0.6) # b-roll inset for 4s
+compare = videos["take1"].beside(videos["take2"])                            # side by side, letterboxed
+card = pictures["frame"].overlay(pictures["logo"], pos="center", scale=0.5)  # picture on picture -> image
+```
+
+A video on top starts playing at `at` and runs for its own length unless `for_` says
+otherwise. Overlays re-encode their span, so put them on the trimmed piece that needs
+them rather than on the whole timeline while iterating.
+
 ## Seeing the edit
 
 **Text and JSON.** `clip.describe()` prints the table above; `clip.to_json()` returns
@@ -159,7 +178,8 @@ gutter; click a gutter line and its segments light up on the timeline. Click the
 timeline to seek. "copy source time" copies the *source file* time under the playhead
 as a literal; "mark…" writes a named marker into the source's sidecar so the script
 can say `.marks["name"]` instead. A failed run shows the error and marks the failing
-line red. Stdlib only: no extra dependency, no build step. A browser without an H.264
+line red. The editor highlights Python and the time literals inside strings. Stdlib only:
+no extra dependency, no build step. A browser without an H.264
 decoder (some Linux Chromium builds) gets frame-by-frame stills instead of playback;
 seeking and marking still work.
 
@@ -174,6 +194,27 @@ p = Project("examples/media")
 p.videos["talk"].remove(("2s", "4s")).with_audio(p.sounds[0], gain=0.3)   # renders inline
 ```
 
+## Driving it from Claude Code
+
+`sceneoverflow init` in any directory writes a `.mcp.json` that registers the
+`sceneoverflow` MCP server, a `CLAUDE.md` with the workflow and the scripting API, a
+starter `edit.py`, and `media/`. Start Claude Code there and it can analyse the footage,
+write and edit the script, run it, look at frames, set markers, and export, with no
+further setup. Open `sceneoverflow studio edit.py` in a browser at the same time: every
+save Claude Code makes re-runs in the studio, and the `studio_state` tool tells Claude
+what the studio sees, including failing lines.
+
+```
+$ sceneoverflow init my-cut && cd my-cut
+created  my-cut/edit.py
+created  my-cut/.mcp.json
+created  my-cut/CLAUDE.md
+$ cp ~/footage/*.mp4 media/ && sceneoverflow studio edit.py &
+$ claude      # "remove the silences from the first video and put the logo top-left for the first 3 seconds"
+```
+
+This repository's own `.mcp.json` points the server at `examples/media`.
+
 ## For LLM agents
 
 The whole surface is text in and text out, which is what an agent needs:
@@ -185,7 +226,8 @@ The whole surface is text in and text out, which is what an agent needs:
   script lines.
 - `sceneoverflow mcp --media ./media` serves the same as MCP tools over stdio:
   `analyze`, `run_edit` (inline code or a path), `frame_at` and `thumbnails` (return
-  images, so a vision model can check a moment), `set_marker`, `api_reference`.
+  images, so a vision model can check a moment), `render`, `set_marker`, `studio_state`,
+  `api_reference`.
 
 Claude Desktop / Claude Code config:
 
@@ -208,18 +250,21 @@ Clip (video or audio unless noted):
 | `head(d)`, `tail(d)` | first or last `d` |
 | `a + b` | concatenate |
 | `with_audio(sound, at=0, mode="mix"/"replace"/"duck", gain=1)`, `dub(...)` | add a sound; output keeps the clip's duration |
-| `overlay(image_or_video, at=0, for_=None, pos="top-right", width=None)` | composite; `pos` is a name or `(x, y)` |
+| `overlay(top, at=0, for_=None, pos="top-right", width=None, scale=None, opacity=1, audio=False)` | image or video on top; `pos` is a name or `(x, y)`; a video top plays from `at`, `audio=True` mixes its sound |
+| `pip(video, at=0, pos="bottom-right", scale=0.3)` | picture-in-picture, sized as a fraction of the frame |
+| `beside(other)`, `above(other)` | two videos side by side or stacked, audios mixed, letterboxed |
 | `text(str, at=0, for_=None, pos="bottom", size=36, color="white", box=None)` | burn a caption |
 | `speed(f)`, `fade_in(d)`, `fade_out(d)`, `fade(d)`, `volume(g)`, `resize(w, h)` | what they say |
 | `.audio` | the audio track as an audio clip |
 | `as_clip(d)` (image) | a still video of duration `d` |
+| `overlay(other_image, ...)` (image) | picture on picture, yields an image |
 | `marks`, `silences()`, `scenes()`, `words()` | anchors |
 | `describe()`, `to_json()`, `timeline_png(path)`, `render(path)`, `preview()`, `frame_at(t)`, `thumbnails()` | output |
 
 Sequence: `[i]`, `get(i)`, `drop(*i)` / `delete(*i)`, `keep(*i)`, `map(fn)`, `join()`.
 `videos`, `sounds`, `pictures` are sequences indexed by number or by (partial) file name.
 
-CLI: `run`, `describe`, `mark`, `proxy`, `frame`, `thumbs`, `watch`, `studio`, `mcp`, `cache`, `api`.
+CLI: `init`, `run`, `describe`, `mark`, `proxy`, `frame`, `thumbs`, `watch`, `studio`, `mcp`, `cache`, `api`.
 `sceneoverflow <cmd> -h` for flags.
 
 ## Limits, stated plainly
@@ -253,6 +298,7 @@ sceneoverflow/
   watch.py        watch mode
   studio/         server.py (stdlib HTTP + SSE + Range) and index.html (vanilla JS)
   agent.py        agent tool functions      mcp_server.py   MCP wrapper
+  integrations.py .mcp.json + CLAUDE.md writer for `sceneoverflow init`
   cli.py
 examples/         basic.py, anchors.py, slideshow.py, notebook.ipynb, media/
 tests/            unit tests (no ffmpeg) and integration tests on synthetic clips
@@ -263,7 +309,7 @@ DESIGN.md         the original plan and what changed while building it
 
 ```
 pip install -e '.[dev]'
-pytest                       # 55 tests, ~2 min; needs ffmpeg
+pytest                       # 61 tests, ~2.5 min; needs ffmpeg
 pytest -m "not ffmpeg"       # pure-python tests only
 ```
 

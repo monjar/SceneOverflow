@@ -9,7 +9,10 @@
 > not `time.py`; the interactive marker tool drives mpv over its IPC socket from the
 > terminal; final-quality export goes through a full-resolution all-intra mezzanine so
 > the same copy-path pipeline serves preview and final; the MCP server also has
-> `thumbnails`, `set_marker` and `api_reference` tools.
+> `thumbnails`, `set_marker`, `render`, `studio_state` and `api_reference` tools. Post-plan
+> additions: video-on-video compositing (`pip`, `beside`, opacity, audio mix, picture on
+> picture), syntax highlighting in the studio editor, and `sceneoverflow init`, which writes
+> `.mcp.json` + `CLAUDE.md` so Claude Code can drive a project.
 
 ## Context
 

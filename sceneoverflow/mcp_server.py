@@ -63,6 +63,17 @@ def build_server(media: str | None = None, cache_dir: str | None = None):
             return Image(data=f.read(), format="png")
 
     @mcp.tool()
+    def render(script: str, out: str, media: str | None = None, mode: str = "final") -> str:
+        """Export a script's result to a file (mode "final" = full resolution, "preview" = 640x360)."""
+        return json.dumps(agent.render(script, out, media=_media(media), mode=mode, cache_dir=cache_dir), default=str)
+
+    @mcp.tool()
+    def studio_state(url: str = "http://127.0.0.1:8765/") -> str:
+        """If `sceneoverflow studio` is running, its last run: ok, timeline, error and failing lines.
+        Edit the script file on disk and the studio re-runs it; call this to see the result."""
+        return json.dumps(agent.studio_state(url), default=str)
+
+    @mcp.tool()
     def set_marker(path: str, name: str, at: str) -> str:
         """Add or move a named marker on a media file (stored in <file>.marks.json)."""
         return json.dumps(agent.set_marker(path, name, at))

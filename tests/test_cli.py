@@ -102,4 +102,31 @@ def test_mcp_server_builds(media_dir):
     from sceneoverflow.mcp_server import build_server
     s = build_server(str(media_dir))
     names = {t.name for t in asyncio.run(s.list_tools())}
-    assert {"analyze", "run_edit", "frame_at", "thumbnails", "set_marker", "api_reference"} <= names
+    assert {"analyze", "run_edit", "frame_at", "thumbnails", "set_marker", "api_reference", "render",
+            "studio_state"} <= names
+
+
+def test_init_writes_claude_code_integration(tmp_path, capsys):
+    d = tmp_path / "proj"
+    (d / "CLAUDE.md").parent.mkdir()
+    (d / "CLAUDE.md").write_text("# my notes\n")
+    assert main(["init", str(d)]) == 0
+    out = capsys.readouterr().out
+    assert "created" in out and ".mcp.json" in out
+    cfg = json.load(open(d / ".mcp.json"))
+    assert cfg["mcpServers"]["sceneoverflow"]["args"] == ["mcp", "--media", "media"]
+    cm = (d / "CLAUDE.md").read_text()
+    assert cm.startswith("# my notes") and "SceneOverflow" in cm and ".with_audio" in cm
+    assert (d / "edit.py").exists() and (d / "media").is_dir()
+    assert ".sceneoverflow/" in (d / ".gitignore").read_text()
+    # second run keeps files
+    assert main(["init", str(d)]) == 0
+    assert "kept" in capsys.readouterr().out
+
+
+def test_agent_render_and_studio_state(media_dir, tmp_path):
+    script = tmp_path / "e.py"
+    script.write_text(SCRIPT)
+    res = agent.render(script, tmp_path / "final.mp4", media=media_dir, mode="final", cache_dir=tmp_path / "c")
+    assert Path(res["out"]).exists() and res["duration"] == pytest.approx(4.0)
+    assert agent.studio_state("http://127.0.0.1:1/")["running"] is False

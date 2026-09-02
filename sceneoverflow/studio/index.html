@@ -25,8 +25,14 @@
   #gutter div.hl { background:var(--hl); color:#fff }
   #gutter div.err { background:var(--err); color:#fff }
   #gutter div.has { color:#b7bccb }
-  #code { flex:1; resize:none; border:0; outline:0; margin:0; padding:8px 10px; background:var(--bg);
-          color:var(--fg); font:inherit; line-height:19px; white-space:pre; overflow:auto; tab-size:4 }
+  #codewrap { position:relative; flex:1; min-width:0 }
+  #code, #hl { position:absolute; inset:0; margin:0; padding:8px 10px; font:inherit; line-height:19px;
+               white-space:pre; tab-size:4; overflow:auto; border:0 }
+  #code { resize:none; outline:0; background:transparent; color:transparent; caret-color:#fff; z-index:1 }
+  #code::selection { background:#3a4a7a99 }
+  #hl { background:var(--bg); color:var(--fg); overflow:hidden; pointer-events:none; z-index:0 }
+  .k { color:#ff7b72 } .s { color:#a5d6ff } .c { color:#8b949e; font-style:italic } .n { color:#f2cc60 }
+  .d { color:#d2a8ff } .f { color:#79c0ff } .m { color:#7ee787 } .t { color:#ffa657 } .b { color:#d2a8ff }
   #right { grid-area:right; display:grid; grid-template-rows:minmax(0,1fr) auto; min-height:0 }
   #player { display:flex; flex-direction:column; align-items:center; justify-content:center; padding:10px;
             min-height:0; background:#101115; position:relative }
@@ -55,7 +61,7 @@
     <span class="dim">hover the timeline to see which line made a segment · click a gutter line to see its segments</span>
     <span id="media"></span>
   </div>
-  <div id="editor"><div id="gutter"></div><textarea id="code" spellcheck="false"></textarea></div>
+  <div id="editor"><div id="gutter"></div><div id="codewrap"><pre id="hl"></pre><textarea id="code" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea></div></div>
   <div id="right">
     <div id="player">
       <video id="v" controls preload="auto"></video>
@@ -85,6 +91,43 @@
     return String(m).padStart(2, '0') + ':' + s.toFixed(3).padStart(6, '0'); };
   const lineOf = where => { const m = /:(\d+)$/.exec(where || ''); return m ? +m[1] : null; };
 
+  // ---------------- syntax highlighting (a pre behind a transparent textarea)
+  const hl = $('hl');
+  const KW = new Set(('False None True and as assert async await break class continue def del elif else except finally ' +
+    'for from global if import in is lambda nonlocal not or pass raise return try while with yield').split(' '));
+  const BUILTIN = new Set('print len range int float str list dict set tuple min max sum sorted enumerate zip map filter any all abs round open'.split(' '));
+  const API = new Set(('trim split_at cut remove keep head tail join concat drop delete map with_audio dub overlay pip beside above text ' +
+    'speed fade_in fade_out fade volume resize as_clip audio marks silences scenes words render preview describe to_json frame_at ' +
+    'thumbnails timeline_png named get find between span set').split(' '));
+  const TOK = /(#[^\n]*)|("""[\s\S]*?"""|'''[\s\S]*?'''|[rRbBfFuU]{0,2}"(?:\\.|[^"\\\n])*"|[rRbBfFuU]{0,2}'(?:\\.|[^'\\\n])*')|(@[A-Za-z_][\w.]*)|(\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b)|(\b[A-Za-z_]\w*\b)|([^\s\w"'#@]+)|(\s+)/g;
+  const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  function highlight(src) {
+    let out = '', m, prev = '', prevWord = '';
+    TOK.lastIndex = 0;
+    while ((m = TOK.exec(src))) {
+      const [raw, com, str, dec, num, word, punct] = m;
+      if (com) out += `<span class="c">${esc(com)}</span>`;
+      else if (str) out += `<span class="s">${esc(str).replace(/(\d+(?:\.\d+)?(?:s|ms|f)|\d+:\d\d(?:\.\d+)?)(?=["'])/g, '<span class="t">$1</span>')}</span>`;
+      else if (dec) out += `<span class="d">${esc(dec)}</span>`;
+      else if (num) out += `<span class="n">${esc(num)}</span>`;
+      else if (word) {
+        const next = src.slice(TOK.lastIndex).match(/^\s*\(/);
+        let cls = '';
+        if (KW.has(word)) cls = 'k';
+        else if (prevWord === 'def' || prevWord === 'class') cls = 'f';
+        else if (prev.endsWith('.') && API.has(word)) cls = 'm';
+        else if (BUILTIN.has(word) && next) cls = 'b';
+        out += cls ? `<span class="${cls}">${esc(word)}</span>` : esc(word);
+        prevWord = word;
+      }
+      else out += esc(raw);
+      if (!/^\s+$/.test(raw)) prev = raw;
+    }
+    return out + '\n';
+  }
+  function renderHighlight() { hl.innerHTML = highlight(code.value); syncScroll(); }
+  function syncScroll() { hl.scrollTop = code.scrollTop; hl.scrollLeft = code.scrollLeft; gutter.scrollTop = code.scrollTop; }
+
   // ---------------- editor
   function renderGutter() {
     const n = code.value.split('\n').length;
@@ -99,15 +142,15 @@
     gutter.innerHTML = html;
     gutter.scrollTop = code.scrollTop;
   }
-  code.addEventListener('scroll', () => gutter.scrollTop = code.scrollTop);
-  code.addEventListener('input', () => { dirty = true; renderGutter(); setStatus(); });
+  code.addEventListener('scroll', syncScroll);
+  code.addEventListener('input', () => { dirty = true; renderHighlight(); renderGutter(); setStatus(); });
   gutter.addEventListener('click', e => {
     const l = +e.target.dataset.l; pinnedLine = pinnedLine === l ? null : l; renderGutter(); draw();
   });
   code.addEventListener('keydown', e => {
     if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); save(); }
     if (e.key === 'Tab') { e.preventDefault(); const s = code.selectionStart;
-      code.setRangeText('    ', s, code.selectionEnd, 'end'); }
+      code.setRangeText('    ', s, code.selectionEnd, 'end'); renderHighlight(); }
   });
   async function save() {
     await fetch('/api/script', { method: 'PUT', body: code.value });
@@ -262,6 +305,7 @@
   // ---------------- boot
   async function boot() {
     code.value = await (await fetch('/api/script')).text();
+    renderHighlight();
     loadMedia();
     const es = new EventSource('/events');
     es.addEventListener('update', ev => {

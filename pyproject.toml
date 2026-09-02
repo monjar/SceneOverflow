@@ -24,7 +24,7 @@ sceneoverflow = "sceneoverflow.cli:main"
 include = ["sceneoverflow*"]
 
 [tool.setuptools.package-data]
-sceneoverflow = ["studio/*.html"]
+sceneoverflow = ["studio/*.html", "py.typed"]
 
 [tool.pytest.ini_options]
 markers = ["ffmpeg: needs ffmpeg/ffprobe on PATH"]

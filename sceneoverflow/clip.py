@@ -5,7 +5,7 @@ Every method returns a new object; nothing is rendered until you ask.
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING, Callable, Iterable
+from typing import TYPE_CHECKING, Callable, Iterable, overload
 
 import hashlib
 from pathlib import Path
@@ -452,6 +452,11 @@ class Sequence:
     def __iter__(self):
         return iter(self.clips)
 
+    @overload
+    def __getitem__(self, i: int) -> Clip: ...
+    @overload
+    def __getitem__(self, i: slice) -> "Sequence": ...
+
     def __getitem__(self, i):
         if isinstance(i, slice):
             return Sequence(self.clips[i], self.project)
@@ -540,6 +545,13 @@ class MediaList(Sequence):
         if len(hits) == 1:
             return hits[0]
         raise KeyError(f"{name!r} matches {len(hits)} of {self.label}: {self.names}")
+
+    @overload
+    def __getitem__(self, i: int) -> Clip: ...
+    @overload
+    def __getitem__(self, i: str) -> Clip: ...
+    @overload
+    def __getitem__(self, i: slice) -> Sequence: ...
 
     def __getitem__(self, i):
         if isinstance(i, str):

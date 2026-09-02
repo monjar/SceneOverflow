@@ -126,3 +126,14 @@ def test_thumbs_endpoint(studio):
     _wait_state(studio.url, lambda s: s["ok"])
     code, hdr, body = _get(studio.url + "api/thumbs?n=6")
     assert code == 200 and hdr["Content-Type"] == "image/png" and body[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_catalog_endpoint(studio):
+    code, _, body = _get(studio.url + "api/catalog")
+    cat = json.loads(body)
+    assert code == 200
+    names = {m["name"] for m in cat["clip"]}
+    assert {"trim", "overlay", "with_audio", "crop", "subtitles"} <= names
+    assert "fade" in cat["transitions"] and "a_intro.mp4" in cat["media"]["videos"]
+    ov = next(m for m in cat["clip"] if m["name"] == "overlay")
+    assert ov["params"][0]["name"] == "top" and any(p["name"] == "opacity" for p in ov["params"])

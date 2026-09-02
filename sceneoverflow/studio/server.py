@@ -263,6 +263,9 @@ class _Handler(BaseHTTPRequestHandler):
                 if not out.exists():
                     clip.frame_at(min(t, max(0.0, clip.duration - 0.05)), str(out), width)
                 return self._send_file(out, "image/jpeg")
+            if u.path == "/api/catalog":
+                from .catalog import catalog
+                return self._json(catalog(Project(s.media, cache_dir=s.cache_dir)))
             if u.path == "/api/thumbs":
                 count = max(4, min(60, int(q.get("n", ["24"])[0])))
                 clip = s.clip()

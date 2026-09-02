@@ -12,7 +12,9 @@
 > `thumbnails`, `set_marker`, `render`, `studio_state` and `api_reference` tools. Post-plan
 > additions: video-on-video compositing (`pip`, `beside`, opacity, audio mix, picture on
 > picture), syntax highlighting in the studio editor, and `sceneoverflow init`, which writes
-> `.mcp.json` + `CLAUDE.md` so Claude Code can drive a project.
+> `.mcp.json` + `CLAUDE.md` so Claude Code can drive a project; transitions, title cards,
+> freeze/loop, loudness normalisation, aspect crop, subtitles, gif/webm export; studio
+> autocomplete driven by a catalog generated from the classes, plus `py.typed` for IDEs.
 
 ## Context
 

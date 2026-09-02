@@ -86,9 +86,24 @@ def segments(node: Node) -> list[Segment]:
         base = segments(node.inputs[0])
         end = float(p["at"]) + float(p["duration"]) if p.get("duration") is not None else node.duration
         top = node.inputs[1]
-        label = os.path.basename(top.params["path"]) if top.op == "source" else f"{top.op}:{top.hash}"
-        return base + [Segment("overlay", float(p["at"]), min(end, node.duration), label, None, None, 1.0, w,
-                               str(p["pos"]))]
+        tsegs = [x for x in segments(top) if x.track == "video"]
+        label = tsegs[0].source if tsegs else f"{top.op}:{top.hash}"
+        note = str(p["pos"])
+        if p.get("scale"):
+            note += f" x{float(p['scale']):g}"
+        if float(p.get("opacity", 1.0)) < 1.0:
+            note += f" @{float(p['opacity']):g}"
+        if p.get("audio"):
+            note += " +audio"
+        if node.kind == IMAGE:
+            return base + [Segment("overlay", 0.0, 0.0, label, None, None, 1.0, w, note)]
+        return base + [Segment("overlay", float(p["at"]), min(end, node.duration), label, None, None, 1.0, w, note)]
+    if op == "beside":
+        left = segments(node.inputs[0])
+        right = [Segment("overlay", s.out_start, s.out_end, s.source, s.src_start, s.src_end, s.rate, s.where,
+                         ("below" if p.get("vertical") else "right") + (f" {s.note}" if s.note else ""))
+                 for s in segments(node.inputs[1]) if s.track == "video"]
+        return left + right
     if op == "text":
         base = segments(node.inputs[0])
         end = float(p["at"]) + float(p["duration"]) if p.get("duration") is not None else node.duration

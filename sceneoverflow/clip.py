@@ -193,18 +193,54 @@ class Clip:
         return self.with_audio(audio, at, "mix", gain)
 
     def overlay(self, top: "Clip", at: TimeLike = 0, for_: TimeLike | None = None, pos="top-right",
-                width: int | None = None, margin: int = 16) -> "Clip":
-        """Composite an image (or video) on top of this clip. ``pos`` is a name
-        (top-left, top-right, bottom-left, bottom-right, center, top, bottom) or ``(x, y)``."""
-        self._need(VIDEO, what="overlay")
+                width: int | None = None, scale: float | None = None, opacity: float = 1.0, audio: bool = False,
+                gain: float = 1.0, margin: int = 16) -> "Clip":
+        """Composite ``top`` (an image or a video) on this clip.
+
+        ``pos`` is a name (top-left, top-right, bottom-left, bottom-right, center, top, bottom)
+        or ``(x, y)``. Size it with ``width`` (pixels) or ``scale`` (fraction of this clip's
+        width). ``opacity`` 0..1. A video ``top`` starts playing at ``at``; ``for_`` defaults to
+        its own length; ``audio=True`` mixes its sound in at ``gain``. Works on an image base
+        too (picture on picture), which yields an image."""
         if top.kind not in (IMAGE, VIDEO):
-            raise EditError("overlay needs an image or video clip")
+            raise EditError("overlay needs an image or video clip on top")
+        if not 0.0 <= opacity <= 1.0:
+            raise EditError("opacity must be between 0 and 1")
+        if scale is not None and not 0.0 < scale <= 1.0:
+            raise EditError("scale must be a fraction of the base width, between 0 and 1")
+        if self.kind == IMAGE:
+            if top.kind != IMAGE:
+                raise EditError("a video on top of a picture: turn the picture into a clip first, "
+                                "pictures[i].as_clip('5s').overlay(video)")
+            return self._new("overlay", IMAGE, {"pos": pos, "width": width, "scale": scale, "opacity": opacity,
+                                                "margin": margin}, [self.node, top.node])
+        self._need(VIDEO, what="overlay")
         at_s = self._t(at)
-        dur = None if for_ is None else self._t(for_)
         if at_s >= self.duration:
             raise EditError(f"overlay at {fmt_time(at_s)} is past the end of {self.name}")
-        return self._new("overlay", VIDEO, {"at": at_s, "duration": dur, "pos": pos, "width": width,
+        dur = None if for_ is None else self._t(for_)
+        if dur is None and top.kind == VIDEO:
+            dur = min(top.duration, self.duration - at_s)
+        return self._new("overlay", VIDEO, {"at": at_s, "duration": dur, "pos": pos, "width": width, "scale": scale,
+                                            "opacity": opacity, "audio": bool(audio), "gain": float(gain),
                                             "margin": margin}, [self.node, top.node])
+
+    def pip(self, top: "Clip", at: TimeLike = 0, for_: TimeLike | None = None, pos="bottom-right",
+            scale: float = 0.3, audio: bool = False, opacity: float = 1.0) -> "Clip":
+        """Picture-in-picture: ``overlay`` sized to a fraction of this clip's width."""
+        return self.overlay(top, at=at, for_=for_, pos=pos, scale=scale, audio=audio, opacity=opacity)
+
+    def beside(self, other: "Clip", vertical: bool = False) -> "Clip":
+        """This clip and ``other`` side by side (or stacked with ``vertical=True``), both audios
+        mixed, letterboxed into the frame. Runs for the longer of the two."""
+        self._need(VIDEO, what="beside")
+        if other.kind != VIDEO:
+            raise EditError("beside needs two video clips (use pictures[i].as_clip(d) for stills)")
+        return self._new("beside", VIDEO, {"vertical": bool(vertical)}, [self.node, other.node])
+
+    def above(self, other: "Clip") -> "Clip":
+        """This clip on top of ``other``, stacked vertically. Alias of ``beside(other, vertical=True)``."""
+        return self.beside(other, vertical=True)
 
     def text(self, text: str, at: TimeLike = 0, for_: TimeLike | None = None, pos="bottom", size: int = 36,
              color: str = "white", font: str | None = None, box: str | None = None) -> "Clip":

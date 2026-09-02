@@ -181,3 +181,50 @@ def test_timeline_png(shared_project, tmp_path):
 def test_notebook_html(shared_project):
     html = shared_project.videos[0].head("1s")._repr_html_()
     assert "<video" in html and "data:video/mp4;base64" in html and "timeline" in html
+
+
+def test_overlay_video_pip_and_beside(shared_project, tmp_path):
+    p = shared_project
+    base = p.videos["a_intro"].head("6s")
+    top = p.videos["b_scenes"].head("3s")
+    v = base.pip(top, at="1s", audio=True)                       # video on video, bottom-right, 30% width
+    assert v.duration == pytest.approx(6.0)
+    out = v.render(tmp_path / "pip.mp4")
+    assert probe_duration(out) == pytest.approx(6.0, abs=0.15)
+    desc = v.describe()
+    assert "overlay" in desc and "b_scenes.mp4" in desc and "x0.3" in desc and "+audio" in desc
+    seg = [s for s in v.to_json()["segments"] if s["track"] == "overlay"][0]
+    assert seg["out_start"] == pytest.approx(1.0) and seg["out_end"] == pytest.approx(4.0)  # for_ defaults to top length
+    # the b-roll is red for its first 5s: the pip region must be reddish at t=2s and not at t=0.5s
+    from PIL import Image
+    red = Image.open(v.frame_at("2s", str(tmp_path / "f2.png"))).convert("RGB")
+    before = Image.open(v.frame_at("0.5s", str(tmp_path / "f0.png"))).convert("RGB")
+    # pip is 30% wide at bottom-right with a 16px margin; sample its centre (the 4:3 clip is pillarboxed)
+    pw, ph = int(red.width * 0.3), int(red.width * 0.3) * 9 // 16
+    px = (red.width - 16 - pw // 2, red.height - 16 - ph // 2)
+    r, g, b = red.getpixel(px)
+    assert r > 150 and g < 90 and b < 90, (r, g, b)
+    assert before.getpixel(px) != red.getpixel(px)
+    half = v.overlay(p.pictures[0], opacity=0.5, scale=0.2, pos="center")
+    assert "@0.5" in half.describe()
+    assert probe_duration(half.render(tmp_path / "half.mp4")) == pytest.approx(6.0, abs=0.15)
+    side = base.head("2s").beside(top)
+    assert side.duration == pytest.approx(3.0)
+    assert probe_dims(side.render(tmp_path / "side.mp4")) == (640, 360)
+    assert "right" in side.describe()
+    stacked = base.head("2s").above(top.head("1s"))
+    assert probe_duration(stacked.render(tmp_path / "stack.mp4")) == pytest.approx(2.0, abs=0.15)
+
+
+def test_picture_on_picture(shared_project, tmp_path):
+    p = shared_project
+    logo = p.pictures[0]
+    card = logo.overlay(logo, pos="center", scale=0.5, opacity=0.8)
+    assert card.kind == "image"
+    out = card.render(tmp_path / "card.png")
+    from PIL import Image
+    assert Image.open(out).size == (80, 40)
+    still = card.as_clip("1s")
+    assert probe_duration(still.render(tmp_path / "card.mp4")) == pytest.approx(1.0, abs=0.15)
+    with pytest.raises(EditError, match="as_clip"):
+        logo.overlay(p.videos[0])

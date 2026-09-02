@@ -249,13 +249,60 @@ class Renderer:
 
     def _op_overlay(self, node: Node, inputs, out: Path) -> None:
         p = node.params
+        base_w, base_h = self._dims(inputs[0])
+        top_kind = node.inputs[1].kind
+        x, y = position_xy(p["pos"], p.get("margin", _MARGIN))
+        width = p.get("width")
+        if p.get("scale"):
+            width = max(2, int(base_w * float(p["scale"])) // 2 * 2)
+        chain = []
+        if width:
+            chain.append(f"scale={int(width)}:-2")
+        if float(p.get("opacity", 1.0)) < 1.0:
+            chain.append(f"format=yuva420p,colorchannelmixer=aa={float(p['opacity']):.3f}")
+        if node.kind == IMAGE:
+            # picture on picture: one composited frame
+            pre = "[1:v]" + (",".join(chain) or "null") + "[ov];"
+            fc = f"{pre}[0:v][ov]overlay=x={x}:y={y}[v]"
+            ffmpeg.run(["-i", inputs[0], "-i", inputs[1], "-filter_complex", fc, "-map", "[v]", "-frames:v", "1", out])
+            return
         at = float(p["at"])
         end = at + float(p["duration"]) if p.get("duration") is not None else node.duration
-        x, y = position_xy(p["pos"], p.get("margin", _MARGIN))
-        pre = f"[1:v]scale={int(p['width'])}:-1[ov];" if p.get("width") else "[1:v]null[ov];"
-        fc = f"{pre}[0:v][ov]overlay=x={x}:y={y}:enable='between(t,{at:.3f},{end:.3f})'[v]"
-        ffmpeg.run(["-i", inputs[0], "-i", inputs[1], "-filter_complex", fc,
-                    "-map", "[v]", "-map", "0:a:0", *self._venc(), "-c:a", "copy", out])
+        if top_kind == VIDEO and at > 0:
+            # shift the top video so its first frame lands at `at`; frames before that are transparent
+            chain.append(f"format=yuva420p,tpad=start_duration={at:.3f}:color=0x00000000")
+        pre = "[1:v]" + (",".join(chain) or "null") + "[ov];"
+        fc = f"{pre}[0:v][ov]overlay=x={x}:y={y}:eof_action=pass:enable='between(t,{at:.3f},{end:.3f})'[v]"
+        maps = ["-map", "[v]"]
+        aenc = ["-c:a", "copy"]
+        if p.get("audio") and top_kind == VIDEO:
+            at_ms = int(round(at * 1000))
+            fc += (f";[1:a]adelay={at_ms}|{at_ms},volume={float(p.get('gain', 1.0)):.3f}[a1];"
+                   f"[0:a][a1]amix=inputs=2:duration=first:normalize=0[a]")
+            maps += ["-map", "[a]"]
+            aenc = self._aenc()
+        else:
+            maps += ["-map", "0:a:0"]
+        ffmpeg.run(["-i", inputs[0], "-i", inputs[1], "-filter_complex", fc, *maps, "-t", f"{node.duration:.6f}",
+                    *self._venc(), *aenc, out])
+
+    def _op_beside(self, node: Node, inputs, out: Path) -> None:
+        """Two videos side by side (or stacked), letterboxed back into the profile frame."""
+        p = node.params
+        w, h = self._dims(inputs[0])
+        vertical = p.get("vertical", False)
+        if vertical:
+            cell = f"scale={w}:{h // 2}:force_original_aspect_ratio=decrease,pad={w}:{h // 2}:(ow-iw)/2:(oh-ih)/2"
+            stack = "vstack=inputs=2"
+        else:
+            cell = f"scale={w // 2}:{h}:force_original_aspect_ratio=decrease,pad={w // 2}:{h}:(ow-iw)/2:(oh-ih)/2"
+            stack = "hstack=inputs=2"
+        dur = node.duration
+        fc = (f"[0:v]{cell},tpad=stop_mode=clone:stop_duration={dur:.3f}[l];[1:v]{cell},tpad=stop_mode=clone:stop_duration={dur:.3f}[r];"
+              f"[l][r]{stack},{self.profile.conform_vf(w, h)}[v];"
+              f"[0:a]apad[a0];[1:a]apad[a1];[a0][a1]amix=inputs=2:duration=longest:normalize=0[a]")
+        ffmpeg.run(["-i", inputs[0], "-i", inputs[1], "-filter_complex", fc, "-map", "[v]", "-map", "[a]",
+                    "-t", f"{dur:.6f}", *self._venc(), *self._aenc(), out])
 
     def _op_speed(self, node: Node, inputs, out: Path) -> None:
         f = float(node.params["factor"])

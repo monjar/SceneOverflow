@@ -7,6 +7,9 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING, Callable, Iterable
 
+import hashlib
+from pathlib import Path
+
 from . import anchors
 from .graph import AUDIO, IMAGE, VIDEO, Node, make
 from .timing import Span, TimeLike, TimeRef, fmt_time, parse_span, parse_time
@@ -17,6 +20,16 @@ if TYPE_CHECKING:
 
 class EditError(ValueError):
     pass
+
+
+TRANSITIONS = {
+    "fade", "fadeblack", "fadewhite", "fadegrays", "dissolve", "pixelize", "distance", "hblur", "radial",
+    "wipeleft", "wiperight", "wipeup", "wipedown", "wipetl", "wipetr", "wipebl", "wipebr",
+    "slideleft", "slideright", "slideup", "slidedown", "smoothleft", "smoothright", "smoothup", "smoothdown",
+    "circlecrop", "rectcrop", "circleclose", "circleopen", "horzclose", "horzopen", "vertclose", "vertopen",
+    "diagbl", "diagbr", "diagtl", "diagtr", "hlslice", "hrslice", "vuslice", "vdslice", "squeezev", "squeezeh",
+    "zoomin", "coverleft", "coverright", "coverup", "coverdown", "revealleft", "revealright", "revealup", "revealdown",
+}
 
 
 class Clip:
@@ -150,6 +163,32 @@ class Clip:
             raise EditError("keep() needs at least one non-empty range")
         return Sequence([self.trim(s.start, s.end) for s in parts], self.project).join()
 
+    def loop(self, times: int) -> "Clip":
+        """Repeat this clip ``times`` times back to back."""
+        if times < 1:
+            raise EditError("loop needs times >= 1")
+        return Sequence([self] * times, self.project).join()
+
+    def still(self, at: TimeLike = 0) -> "Clip":
+        """The frame at ``at`` as an image clip (use ``.as_clip(d)`` to hold it)."""
+        self._need(VIDEO, what="still")
+        t = min(self._t(at), max(0.0, self.duration - 0.04))
+        return self._new("still", IMAGE, {"at": t}, [self.node])
+
+    def freeze(self, at: TimeLike, duration: TimeLike = "2s") -> "Clip":
+        """Freeze-frame: hold the frame at ``at`` for ``duration`` and continue."""
+        self._need(VIDEO, what="freeze")
+        t = self._t(at)
+        held = self.still(t).as_clip(duration)
+        parts = [self.trim(0, t), held] if t > 0 else [held]
+        if t < self.duration:
+            parts.append(self.trim(t, self.duration))
+        return Sequence(parts, self.project).join()
+
+    def crossfade(self, other: "Clip", duration: TimeLike = "0.5s", transition: str = "fade") -> "Clip":
+        """This clip into ``other`` with a transition. See :meth:`Sequence.join`."""
+        return Sequence([self, other], self.project).join(transition=transition, duration=duration)
+
     def head(self, duration: TimeLike) -> "Clip":
         return self.trim(0, min(self._t(duration), self.duration))
 
@@ -193,18 +232,54 @@ class Clip:
         return self.with_audio(audio, at, "mix", gain)
 
     def overlay(self, top: "Clip", at: TimeLike = 0, for_: TimeLike | None = None, pos="top-right",
-                width: int | None = None, margin: int = 16) -> "Clip":
-        """Composite an image (or video) on top of this clip. ``pos`` is a name
-        (top-left, top-right, bottom-left, bottom-right, center, top, bottom) or ``(x, y)``."""
-        self._need(VIDEO, what="overlay")
+                width: int | None = None, scale: float | None = None, opacity: float = 1.0, audio: bool = False,
+                gain: float = 1.0, margin: int = 16) -> "Clip":
+        """Composite ``top`` (an image or a video) on this clip.
+
+        ``pos`` is a name (top-left, top-right, bottom-left, bottom-right, center, top, bottom)
+        or ``(x, y)``. Size it with ``width`` (pixels) or ``scale`` (fraction of this clip's
+        width). ``opacity`` 0..1. A video ``top`` starts playing at ``at``; ``for_`` defaults to
+        its own length; ``audio=True`` mixes its sound in at ``gain``. Works on an image base
+        too (picture on picture), which yields an image."""
         if top.kind not in (IMAGE, VIDEO):
-            raise EditError("overlay needs an image or video clip")
+            raise EditError("overlay needs an image or video clip on top")
+        if not 0.0 <= opacity <= 1.0:
+            raise EditError("opacity must be between 0 and 1")
+        if scale is not None and not 0.0 < scale <= 1.0:
+            raise EditError("scale must be a fraction of the base width, between 0 and 1")
+        if self.kind == IMAGE:
+            if top.kind != IMAGE:
+                raise EditError("a video on top of a picture: turn the picture into a clip first, "
+                                "pictures[i].as_clip('5s').overlay(video)")
+            return self._new("overlay", IMAGE, {"pos": pos, "width": width, "scale": scale, "opacity": opacity,
+                                                "margin": margin}, [self.node, top.node])
+        self._need(VIDEO, what="overlay")
         at_s = self._t(at)
-        dur = None if for_ is None else self._t(for_)
         if at_s >= self.duration:
             raise EditError(f"overlay at {fmt_time(at_s)} is past the end of {self.name}")
-        return self._new("overlay", VIDEO, {"at": at_s, "duration": dur, "pos": pos, "width": width,
+        dur = None if for_ is None else self._t(for_)
+        if dur is None and top.kind == VIDEO:
+            dur = min(top.duration, self.duration - at_s)
+        return self._new("overlay", VIDEO, {"at": at_s, "duration": dur, "pos": pos, "width": width, "scale": scale,
+                                            "opacity": opacity, "audio": bool(audio), "gain": float(gain),
                                             "margin": margin}, [self.node, top.node])
+
+    def pip(self, top: "Clip", at: TimeLike = 0, for_: TimeLike | None = None, pos="bottom-right",
+            scale: float = 0.3, audio: bool = False, opacity: float = 1.0) -> "Clip":
+        """Picture-in-picture: ``overlay`` sized to a fraction of this clip's width."""
+        return self.overlay(top, at=at, for_=for_, pos=pos, scale=scale, audio=audio, opacity=opacity)
+
+    def beside(self, other: "Clip", vertical: bool = False) -> "Clip":
+        """This clip and ``other`` side by side (or stacked with ``vertical=True``), both audios
+        mixed, letterboxed into the frame. Runs for the longer of the two."""
+        self._need(VIDEO, what="beside")
+        if other.kind != VIDEO:
+            raise EditError("beside needs two video clips (use pictures[i].as_clip(d) for stills)")
+        return self._new("beside", VIDEO, {"vertical": bool(vertical)}, [self.node, other.node])
+
+    def above(self, other: "Clip") -> "Clip":
+        """This clip on top of ``other``, stacked vertically. Alias of ``beside(other, vertical=True)``."""
+        return self.beside(other, vertical=True)
 
     def text(self, text: str, at: TimeLike = 0, for_: TimeLike | None = None, pos="bottom", size: int = 36,
              color: str = "white", font: str | None = None, box: str | None = None) -> "Clip":
@@ -242,6 +317,54 @@ class Clip:
     def volume(self, gain: float) -> "Clip":
         self._need(VIDEO, AUDIO, what="volume")
         return self._new("volume", self.kind, {"gain": float(gain)}, [self.node])
+
+    def mute(self) -> "Clip":
+        return self.volume(0.0)
+
+    def normalize(self, lufs: float = -16.0) -> "Clip":
+        """Loudness-normalise the audio (EBU R128, default -16 LUFS: podcast/YouTube level)."""
+        self._need(VIDEO, AUDIO, what="normalize")
+        return self._new("loudnorm", self.kind, {"lufs": float(lufs)}, [self.node])
+
+    def crop(self, aspect: str | None = None, anchor="center", x: int | None = None, y: int | None = None,
+             w: int | None = None, h: int | None = None) -> "Clip":
+        """Crop to an aspect ratio (``"9:16"`` for vertical, ``"1:1"``) anchored at ``center``/``left``/
+        ``right``/``top``/``bottom`` or an ``(fx, fy)`` pair in 0..1, or to an explicit ``x, y, w, h`` box.
+        The frame size changes, so crop last (or crop every piece the same way before joining)."""
+        self._need(VIDEO, what="crop")
+        if aspect:
+            try:
+                aw, ah = (float(v) for v in str(aspect).replace("x", ":").split(":"))
+            except ValueError:
+                raise EditError(f"aspect must look like '9:16', got {aspect!r}") from None
+            named = {"center": (0.5, 0.5), "left": (0.0, 0.5), "right": (1.0, 0.5), "top": (0.5, 0.0),
+                     "bottom": (0.5, 1.0)}
+            fx, fy = named[anchor] if isinstance(anchor, str) else (float(anchor[0]), float(anchor[1]))
+            return self._new("crop", VIDEO, {"aspect": [aw, ah], "anchor": [fx, fy]}, [self.node])
+        if None in (x, y, w, h):
+            raise EditError("crop needs aspect= or all of x, y, w, h")
+        return self._new("crop", VIDEO, {"x": int(x), "y": int(y), "w": int(w), "h": int(h)}, [self.node])
+
+    def subtitles(self, source, style: str | None = None) -> "Clip":
+        """Burn subtitles from an ``.srt``/``.ass`` file or a :class:`~sceneoverflow.anchors.Transcript`.
+        ``style`` is an ASS override like ``"FontSize=28,PrimaryColour=&H00FFFF00"``."""
+        self._need(VIDEO, what="subtitles")
+        if isinstance(source, anchors.Transcript):
+            srt = source.to_srt()
+            key = hashlib.sha256(srt.encode()).hexdigest()[:16]
+            path = self.project.cache.scratch(f"subs-{key}.srt")
+            path.write_text(srt)
+            sig = key
+        else:
+            path = Path(source).resolve()
+            if not path.exists():
+                raise EditError(f"subtitle file not found: {path}")
+            sig = f"{path.stat().st_size}|{int(path.stat().st_mtime)}"
+        return self._new("subtitles", VIDEO, {"path": str(path), "sig": sig, "style": style}, [self.node])
+
+    def captions(self, style: str | None = None, **transcribe_opts) -> "Clip":
+        """Burn captions from the transcript (needs the ``whisper`` extra)."""
+        return self.subtitles(self.words(**transcribe_opts), style=style)
 
     def resize(self, width: int, height: int) -> "Clip":
         self._need(VIDEO, what="resize")
@@ -281,9 +404,11 @@ class Clip:
         return anchors.transcribe(self._analysis_file(), model, language, cache=self.project.cache)
 
     # ------------------------------------------------------------- output
-    def render(self, out: str = "out.mp4") -> str:
-        """Render at the project's current quality mode to ``out``."""
-        return str(self.project.renderer.export(self.node, out))
+    def render(self, out: str = "out.mp4", **options) -> str:
+        """Render at the project's current quality mode to ``out``. The extension picks the
+        container: ``.mp4`` (H.264/AAC), ``.webm`` (VP9/Opus), ``.gif`` (``fps=``, ``width=``),
+        ``.wav``/``.mp3``/``.m4a`` for audio, ``.png`` for images."""
+        return str(self.project.renderer.export(self.node, out, **options))
 
     def preview(self) -> str:
         """Path of the cached preview render for this exact graph."""
@@ -365,8 +490,10 @@ class Sequence:
     def map(self, fn: Callable[[Clip], Clip]) -> "Sequence":
         return Sequence([fn(c) for c in self.clips], self.project)
 
-    def join(self) -> Clip:
-        """Concatenate into one clip."""
+    def join(self, transition: str | None = None, duration: TimeLike = "0.5s") -> Clip:
+        """Concatenate into one clip. With ``transition`` (``fade``, ``dissolve``, ``wipeleft``,
+        ``slideright``, ``circleopen``... any ffmpeg xfade name) each cut becomes a transition of
+        ``duration`` and the result is shorter by that much per cut."""
         if not self.clips:
             raise EditError("cannot join an empty sequence")
         kinds = {c.kind for c in self.clips}
@@ -377,6 +504,17 @@ class Sequence:
         if len(self.clips) == 1:
             return self.clips[0]
         kind = self.clips[0].kind
+        if transition:
+            if kind != VIDEO:
+                raise EditError("transitions need video clips")
+            if transition not in TRANSITIONS:
+                raise EditError(f"unknown transition {transition!r}; one of {', '.join(sorted(TRANSITIONS))}")
+            d = parse_time(duration, self.project.profile.fps)
+            short = [c.name for c in self.clips if c.duration <= d]
+            if short:
+                raise EditError(f"transition of {d:.2f}s is longer than these clips: {short}")
+            return Clip(make("xfade", VIDEO, {"transition": transition, "duration": d},
+                             [c.node for c in self.clips]), self.project)
         return Clip(make("concat", kind, {}, [c.node for c in self.clips]), self.project)
 
     def concat(self) -> Clip:

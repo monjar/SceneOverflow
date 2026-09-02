@@ -181,3 +181,135 @@ def test_timeline_png(shared_project, tmp_path):
 def test_notebook_html(shared_project):
     html = shared_project.videos[0].head("1s")._repr_html_()
     assert "<video" in html and "data:video/mp4;base64" in html and "timeline" in html
+
+
+def test_overlay_video_pip_and_beside(shared_project, tmp_path):
+    p = shared_project
+    base = p.videos["a_intro"].head("6s")
+    top = p.videos["b_scenes"].head("3s")
+    v = base.pip(top, at="1s", audio=True)                       # video on video, bottom-right, 30% width
+    assert v.duration == pytest.approx(6.0)
+    out = v.render(tmp_path / "pip.mp4")
+    assert probe_duration(out) == pytest.approx(6.0, abs=0.15)
+    desc = v.describe()
+    assert "overlay" in desc and "b_scenes.mp4" in desc and "x0.3" in desc and "+audio" in desc
+    seg = [s for s in v.to_json()["segments"] if s["track"] == "overlay"][0]
+    assert seg["out_start"] == pytest.approx(1.0) and seg["out_end"] == pytest.approx(4.0)  # for_ defaults to top length
+    # the b-roll is red for its first 5s: the pip region must be reddish at t=2s and not at t=0.5s
+    from PIL import Image
+    red = Image.open(v.frame_at("2s", str(tmp_path / "f2.png"))).convert("RGB")
+    before = Image.open(v.frame_at("0.5s", str(tmp_path / "f0.png"))).convert("RGB")
+    # pip is 30% wide at bottom-right with a 16px margin; sample its centre (the 4:3 clip is pillarboxed)
+    pw, ph = int(red.width * 0.3), int(red.width * 0.3) * 9 // 16
+    px = (red.width - 16 - pw // 2, red.height - 16 - ph // 2)
+    r, g, b = red.getpixel(px)
+    assert r > 150 and g < 90 and b < 90, (r, g, b)
+    assert before.getpixel(px) != red.getpixel(px)
+    half = v.overlay(p.pictures[0], opacity=0.5, scale=0.2, pos="center")
+    assert "@0.5" in half.describe()
+    assert probe_duration(half.render(tmp_path / "half.mp4")) == pytest.approx(6.0, abs=0.15)
+    side = base.head("2s").beside(top)
+    assert side.duration == pytest.approx(3.0)
+    assert probe_dims(side.render(tmp_path / "side.mp4")) == (640, 360)
+    assert "right" in side.describe()
+    stacked = base.head("2s").above(top.head("1s"))
+    assert probe_duration(stacked.render(tmp_path / "stack.mp4")) == pytest.approx(2.0, abs=0.15)
+
+
+def test_picture_on_picture(shared_project, tmp_path):
+    p = shared_project
+    logo = p.pictures[0]
+    card = logo.overlay(logo, pos="center", scale=0.5, opacity=0.8)
+    assert card.kind == "image"
+    out = card.render(tmp_path / "card.png")
+    from PIL import Image
+    assert Image.open(out).size == (80, 40)
+    still = card.as_clip("1s")
+    assert probe_duration(still.render(tmp_path / "card.mp4")) == pytest.approx(1.0, abs=0.15)
+    with pytest.raises(EditError, match="as_clip"):
+        logo.overlay(p.videos[0])
+
+
+def test_transitions(shared_project, tmp_path):
+    p = shared_project
+    a, b, c = p.videos[0].head("3s"), p.videos["b_scenes"].head("3s"), p.videos["c_gap"].head("2s")
+    from sceneoverflow import Sequence
+    v = Sequence([a, b, c], p).join(transition="wipeleft", duration="0.5s")
+    assert v.duration == pytest.approx(3 + 3 + 2 - 1.0)
+    out = v.render(tmp_path / "xf.mp4")
+    assert probe_duration(out) == pytest.approx(7.0, abs=0.15)
+    desc = v.describe()
+    assert "wipeleft transition" in desc and desc.count("wipeleft") == 2
+    segs = v.to_json()["segments"]
+    second = [s for s in segs if s["track"] == "video"][1]
+    assert second["out_start"] == pytest.approx(2.5)
+    assert a.crossfade(b).duration == pytest.approx(5.5)
+    with pytest.raises(EditError, match="longer than"):
+        a.crossfade(b, duration="4s")
+    with pytest.raises(EditError, match="unknown transition"):
+        a.crossfade(b, transition="explode")
+
+
+def test_title_blank_freeze_loop_normalize_mute(shared_project, tmp_path):
+    p = shared_project
+    card = p.title("Chapter 1", "1.5s", bg="0x223344")
+    assert card.duration == pytest.approx(1.5) and "color:0x223344" in card.describe() and "'Chapter 1'" in card.describe()
+    v = card + p.videos[0].head("2s")
+    assert probe_duration(v.render(tmp_path / "t.mp4")) == pytest.approx(3.5, abs=0.15)
+    fz = p.videos[0].head("2s").freeze("1s", "1s")
+    assert fz.duration == pytest.approx(3.0)
+    assert probe_duration(fz.render(tmp_path / "fz.mp4")) == pytest.approx(3.0, abs=0.15)
+    desc = fz.describe()
+    assert "(still)" in desc and "a_intro.mp4 [00:01.000-00:01.000]" in desc
+    lp = p.videos[0].head("1s").loop(3)
+    assert lp.duration == pytest.approx(3.0)
+    nz = p.videos[0].head("2s").normalize().mute()
+    assert "normalize -16 LUFS" in nz.describe() and "volume x0.00" in nz.describe()
+    assert probe_duration(nz.render(tmp_path / "nz.mp4")) == pytest.approx(2.0, abs=0.15)
+    assert probe_duration(p.sounds[0].head("2s").normalize().render(tmp_path / "nz.wav")) == pytest.approx(2.0, abs=0.1)
+    blank = p.blank("0.5s")
+    assert probe_dims(blank.render(tmp_path / "b.mp4")) == (640, 360)
+
+
+def test_crop_aspect_and_box(shared_project, tmp_path):
+    p = shared_project
+    v = p.videos[0].head("1s")
+    vert = v.crop("9:16")
+    assert probe_dims(vert.render(tmp_path / "v.mp4")) == (202, 360)
+    sq = v.crop("1:1", anchor="left")
+    assert probe_dims(sq.render(tmp_path / "sq.mp4")) == (360, 360)
+    box = v.crop(x=10, y=10, w=100, h=50)
+    assert probe_dims(box.render(tmp_path / "box.mp4")) == (100, 50)
+    assert "crop 9:16" in vert.describe()
+    with pytest.raises(EditError):
+        v.crop("nine-sixteen")
+    # cropped pieces still concat (filter fallback conforms to the first input)
+    both = vert + v.crop("9:16", anchor="right")
+    assert probe_dims(both.render(tmp_path / "both.mp4")) == (202, 360)
+
+
+def test_subtitles_from_srt_and_transcript(shared_project, tmp_path):
+    from sceneoverflow import Transcript, Word
+    p = shared_project
+    words = [Word("hello", 0.2, 0.5), Word("there", 0.6, 0.9), Word("world.", 1.0, 1.4), Word("bye", 2.0, 2.3)]
+    t = Transcript(words)
+    cues = t.cues()
+    assert [c.label for c in cues] == ["hello there world.", "bye"]
+    srt = t.to_srt(tmp_path / "t.srt")
+    assert "00:00:00,200 --> 00:00:01,400" in srt and srt.count("-->") == 2
+    v = p.videos[0].head("3s")
+    a = v.subtitles(tmp_path / "t.srt", style="FontSize=30")
+    b = v.subtitles(t)
+    for clip, name in ((a, "a"), (b, "b")):
+        assert probe_duration(clip.render(tmp_path / f"{name}.mp4")) == pytest.approx(3.0, abs=0.15)
+    assert "(subtitles)" in a.describe() and "t.srt" in a.describe()
+    with pytest.raises(EditError, match="not found"):
+        v.subtitles("/nope.srt")
+
+
+def test_gif_and_webm_export(shared_project, tmp_path):
+    v = shared_project.videos[0].head("1s")
+    gif = v.render(tmp_path / "o.gif", fps=8, width=160)
+    assert Path(gif).read_bytes()[:6] in (b"GIF89a", b"GIF87a")
+    webm = v.render(tmp_path / "o.webm")
+    assert probe_duration(webm) == pytest.approx(1.0, abs=0.15)

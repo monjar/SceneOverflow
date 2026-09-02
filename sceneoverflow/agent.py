@@ -115,6 +115,28 @@ def thumbnails(target: str | Path, media: str | Path | None = None, out: str | P
     return clip.thumbnails(str(out) if out else None, count)
 
 
+def render(script: str | Path, out: str | Path, media: str | Path | None = None, mode: str = "final",
+           cache_dir: str | Path | None = None) -> dict:
+    """Export a script's result to a file. ``mode="final"`` uses the originals' full resolution."""
+    res = run_script(script, media=media, out=out, mode=mode, cache_dir=cache_dir)
+    return {"out": res["out"], "duration": res["clip"].duration, "describe": res["clip"].describe()}
+
+
+def studio_state(url: str = "http://127.0.0.1:8765/") -> dict:
+    """State of a running ``sceneoverflow studio`` (last run, timeline, errors), or {"running": False}."""
+    import json
+    import urllib.error
+    import urllib.request
+    try:
+        with urllib.request.urlopen(url.rstrip("/") + "/api/state", timeout=3) as r:
+            st = json.loads(r.read())
+    except (urllib.error.URLError, OSError, ValueError):
+        return {"running": False, "url": url}
+    st["running_studio"] = True
+    st.pop("log", None) if st.get("ok") else None
+    return st
+
+
 def set_marker(path: str | Path, name: str, at) -> dict:
     ms = MarkerSet(path)
     ms.set(name, at)
@@ -128,14 +150,19 @@ Times: seconds, "12s", "500ms", "1:23.5", "120f", a TimeRef, or a Span.
 
 Clip (video/audio):
   .trim(start, end=None) .split_at(*t) / .cut(*t) -> Sequence   .remove(*spans) .keep(*spans)
-  .head(d) .tail(d)   a + b (concat)   .speed(f)   .fade_in(d) .fade_out(d) .fade(d)   .volume(g)
+  .head(d) .tail(d)   a + b (concat)   .loop(n)   .freeze(at, d)   .still(at) -> image
+  .speed(f)   .fade_in(d) .fade_out(d) .fade(d)   .volume(g) .mute() .normalize(lufs=-16)
+  .crop(aspect="9:16", anchor="center")   .subtitles(srt_path_or_transcript, style=None)   .captions()
+  .crossfade(other, d, transition="fade")
   .with_audio(sound, at=0, mode="mix"|"replace"|"duck", gain=1) / .dub(sound)
-  .overlay(image_or_video, at, for_=None, pos="top-right"|(x,y), width=None)
+  .overlay(image_or_video, at=0, for_=None, pos="top-right"|(x,y), width=None, scale=None, opacity=1, audio=False)
+  .pip(video, at, pos="bottom-right", scale=0.3, audio=False)   .beside(other) .above(other)
   .text(str, at, for_=None, pos="bottom", size=36, color="white", box=None)
   .resize(w, h)   .audio (audio track as a clip)
 Anchors: .marks["name"] (source clips) .silences(min_len, threshold_db) .scenes(threshold)
          .words() -> Transcript with .find("phrase") -> Span, .between(a, b)
-Image clip: .as_clip("3s")
-Sequence: [i] .get(i) .drop(*i) / .delete(*i) .keep(*i) .map(fn) .join()
-Output: .describe() .to_json() .render(path) .preview() .frame_at(t) .timeline_png(path)
+Image clip: .as_clip("3s")   picture on picture: img.overlay(img2, pos, scale, opacity) -> image
+Sequence: [i] .get(i) .drop(*i) / .delete(*i) .keep(*i) .map(fn) .join(transition=None, duration="0.5s")
+Generated (edit(..., project=project) to get it): project.blank("1s", "black")  project.title("Text", "3s")
+Output: .describe() .to_json() .render(path: .mp4/.webm/.gif/.wav/.png) .preview() .frame_at(t) .timeline_png(path)
 """

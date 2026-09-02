@@ -10,7 +10,7 @@
 Run with ``sceneoverflow run script.py --media ./media -o out.mp4``.
 """
 from .anchors import MarkerSet, Transcript, Word
-from .clip import Clip, EditError, MediaList, Sequence
+from .clip import TRANSITIONS, Clip, EditError, MediaList, Sequence
 from .graph import Node
 from .media import MediaError, Profile, Source
 from .project import Project, edit, load_script, run_script

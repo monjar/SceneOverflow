@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from .clip import Clip, EditError, MediaList, Sequence
+from .timing import TimeLike
 from .graph import AUDIO, IMAGE, VIDEO, make
 from .media import MediaError, Source, ffprobe_json, file_sig, final_profile, preview_profile, scan_dir
 from .render import Cache, Renderer
@@ -62,6 +63,20 @@ class Project:
         node = make("source", s.kind, {"path": s.path, "sig": s.sig, "duration": s.duration,
                                        "has_audio": s.has_audio, "width": s.width, "height": s.height})
         return Clip(node, self)
+
+    def blank(self, duration: TimeLike = "1s", color: str = "black") -> Clip:
+        """A solid-colour clip with silent audio (for gaps, title cards, backgrounds)."""
+        from .timing import parse_time
+        d = parse_time(duration, self.profile.fps)
+        if d <= 0:
+            raise EditError("blank duration must be positive")
+        node = make("color", VIDEO, {"color": color, "duration": d})
+        return Clip(node, self)
+
+    def title(self, text: str, duration: TimeLike = "3s", size: int = 56, color: str = "white",
+              bg: str = "black", pos="center", font: str | None = None) -> Clip:
+        """A title card: ``text`` on a ``bg`` colour for ``duration``."""
+        return self.blank(duration, bg).text(text, pos=pos, size=size, color=color, font=font)
 
     @property
     def sources(self) -> list[Source]:

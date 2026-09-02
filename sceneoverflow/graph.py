@@ -117,8 +117,17 @@ def duration_of(n: Node) -> float:
         if p.get("extend"):
             return max(base, float(p["at"]) + duration_of(n.inputs[1]))
         return base
-    if n.op in ("overlay", "fade", "resize", "text", "volume", "mix"):
+    if n.op in ("overlay", "fade", "resize", "text", "volume", "mix", "audio_of", "loudnorm", "crop", "subtitles"):
         return duration_of(n.inputs[0])
+    if n.op == "beside":
+        return max(duration_of(i) for i in n.inputs)
+    if n.op == "xfade":
+        d = float(p["duration"])
+        return sum(duration_of(i) for i in n.inputs) - d * (len(n.inputs) - 1)
+    if n.op == "color":
+        return float(p["duration"])
+    if n.op == "still":
+        return 0.0
     raise ValueError(f"unknown op {n.op!r}")
 
 

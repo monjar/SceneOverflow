@@ -98,7 +98,7 @@ class Renderer:
         self.stats.rendered.append(node.hash)
         return out
 
-    def export(self, node: Node, out_path: str | Path) -> Path:
+    def export(self, node: Node, out_path: str | Path, **kw) -> Path:
         """Render then encode a delivery file (normal GOP, faststart)."""
         src = self.render(node)
         out_path = Path(out_path)
@@ -115,6 +115,17 @@ class Renderer:
             return out_path
         if node.kind == IMAGE:
             shutil.copyfile(src, out_path)
+            return out_path
+        ext = out_path.suffix.lower()
+        if ext == ".gif":
+            fps, width = int(kw.get("fps", 12)), int(kw.get("width", 480))
+            fc = (f"[0:v]fps={fps},scale={width}:-2:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];"
+                  f"[b][p]paletteuse=dither=bayer:bayer_scale=5")
+            ffmpeg.run(["-i", src, "-filter_complex", fc, "-loop", "0", out_path])
+            return out_path
+        if ext == ".webm":
+            ffmpeg.run(["-i", src, "-c:v", "libvpx-vp9", "-crf", "32", "-b:v", "0", "-row-mt", "1",
+                        "-c:a", "libopus", "-b:a", "128k", out_path])
             return out_path
         ffmpeg.run([
             "-i", src, "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p",
@@ -249,13 +260,121 @@ class Renderer:
 
     def _op_overlay(self, node: Node, inputs, out: Path) -> None:
         p = node.params
+        base_w, base_h = self._dims(inputs[0])
+        top_kind = node.inputs[1].kind
+        x, y = position_xy(p["pos"], p.get("margin", _MARGIN))
+        width = p.get("width")
+        if p.get("scale"):
+            width = max(2, int(base_w * float(p["scale"])) // 2 * 2)
+        chain = []
+        if width:
+            chain.append(f"scale={int(width)}:-2")
+        if float(p.get("opacity", 1.0)) < 1.0:
+            chain.append(f"format=yuva420p,colorchannelmixer=aa={float(p['opacity']):.3f}")
+        if node.kind == IMAGE:
+            # picture on picture: one composited frame
+            pre = "[1:v]" + (",".join(chain) or "null") + "[ov];"
+            fc = f"{pre}[0:v][ov]overlay=x={x}:y={y}[v]"
+            ffmpeg.run(["-i", inputs[0], "-i", inputs[1], "-filter_complex", fc, "-map", "[v]", "-frames:v", "1", out])
+            return
         at = float(p["at"])
         end = at + float(p["duration"]) if p.get("duration") is not None else node.duration
-        x, y = position_xy(p["pos"], p.get("margin", _MARGIN))
-        pre = f"[1:v]scale={int(p['width'])}:-1[ov];" if p.get("width") else "[1:v]null[ov];"
-        fc = f"{pre}[0:v][ov]overlay=x={x}:y={y}:enable='between(t,{at:.3f},{end:.3f})'[v]"
-        ffmpeg.run(["-i", inputs[0], "-i", inputs[1], "-filter_complex", fc,
-                    "-map", "[v]", "-map", "0:a:0", *self._venc(), "-c:a", "copy", out])
+        if top_kind == VIDEO and at > 0:
+            # shift the top video so its first frame lands at `at`; frames before that are transparent
+            chain.append(f"format=yuva420p,tpad=start_duration={at:.3f}:color=0x00000000")
+        pre = "[1:v]" + (",".join(chain) or "null") + "[ov];"
+        fc = f"{pre}[0:v][ov]overlay=x={x}:y={y}:eof_action=pass:enable='between(t,{at:.3f},{end:.3f})'[v]"
+        maps = ["-map", "[v]"]
+        aenc = ["-c:a", "copy"]
+        if p.get("audio") and top_kind == VIDEO:
+            at_ms = int(round(at * 1000))
+            fc += (f";[1:a]adelay={at_ms}|{at_ms},volume={float(p.get('gain', 1.0)):.3f}[a1];"
+                   f"[0:a][a1]amix=inputs=2:duration=first:normalize=0[a]")
+            maps += ["-map", "[a]"]
+            aenc = self._aenc()
+        else:
+            maps += ["-map", "0:a:0"]
+        ffmpeg.run(["-i", inputs[0], "-i", inputs[1], "-filter_complex", fc, *maps, "-t", f"{node.duration:.6f}",
+                    *self._venc(), *aenc, out])
+
+    def _op_beside(self, node: Node, inputs, out: Path) -> None:
+        """Two videos side by side (or stacked), letterboxed back into the profile frame."""
+        p = node.params
+        w, h = self._dims(inputs[0])
+        vertical = p.get("vertical", False)
+        if vertical:
+            cell = f"scale={w}:{h // 2}:force_original_aspect_ratio=decrease,pad={w}:{h // 2}:(ow-iw)/2:(oh-ih)/2"
+            stack = "vstack=inputs=2"
+        else:
+            cell = f"scale={w // 2}:{h}:force_original_aspect_ratio=decrease,pad={w // 2}:{h}:(ow-iw)/2:(oh-ih)/2"
+            stack = "hstack=inputs=2"
+        dur = node.duration
+        fc = (f"[0:v]{cell},tpad=stop_mode=clone:stop_duration={dur:.3f}[l];[1:v]{cell},tpad=stop_mode=clone:stop_duration={dur:.3f}[r];"
+              f"[l][r]{stack},{self.profile.conform_vf(w, h)}[v];"
+              f"[0:a]apad[a0];[1:a]apad[a1];[a0][a1]amix=inputs=2:duration=longest:normalize=0[a]")
+        ffmpeg.run(["-i", inputs[0], "-i", inputs[1], "-filter_complex", fc, "-map", "[v]", "-map", "[a]",
+                    "-t", f"{dur:.6f}", *self._venc(), *self._aenc(), out])
+
+    def _op_xfade(self, node: Node, inputs, out: Path) -> None:
+        """N clips joined with a transition between each pair (single encode)."""
+        p = node.params
+        d, tr = float(p["duration"]), p["transition"]
+        durs = [i.duration for i in node.inputs]
+        parts, vprev, aprev, acc = [], "[0:v]", "[0:a]", durs[0]
+        for k in range(1, len(inputs)):
+            off = acc - d
+            parts.append(f"{vprev}[{k}:v]xfade=transition={tr}:duration={d:.3f}:offset={off:.3f}[v{k}]")
+            parts.append(f"{aprev}[{k}:a]acrossfade=d={d:.3f}[a{k}]")
+            vprev, aprev = f"[v{k}]", f"[a{k}]"
+            acc += durs[k] - d
+        args = []
+        for i in inputs:
+            args += ["-i", i]
+        ffmpeg.run(args + ["-filter_complex", ";".join(parts), "-map", vprev, "-map", aprev,
+                           *self._venc(), *self._aenc(), out])
+
+    def _op_color(self, node: Node, inputs, out: Path) -> None:
+        p = node.params
+        d = float(p["duration"])
+        pr = self.profile
+        ffmpeg.run(["-f", "lavfi", "-i", f"color=c={p['color']}:size={pr.width}x{pr.height}:rate={pr.fps}:d={d:.3f}",
+                    "-f", "lavfi", "-i", f"anullsrc=r={pr.sample_rate}:cl=stereo", "-t", f"{d:.3f}",
+                    "-map", "0:v:0", "-map", "1:a:0", "-vf", "format=yuv420p", *self._venc(), *self._aenc(), out])
+
+    def _op_loudnorm(self, node: Node, inputs, out: Path) -> None:
+        p = node.params
+        af = f"loudnorm=I={float(p['lufs']):.1f}:TP=-1.5:LRA=11"
+        args = ["-i", inputs[0], "-af", af, "-ar", str(self.profile.sample_rate)]
+        args += self.profile.wav_args() if node.kind == AUDIO else ["-c:v", "copy", *self._aenc()]
+        ffmpeg.run(args + [out])
+
+    def _op_crop(self, node: Node, inputs, out: Path) -> None:
+        p = node.params
+        W, H = self._dims(inputs[0])
+        if p.get("aspect"):
+            aw, ah = p["aspect"]
+            w = min(W, int(H * aw / ah))
+            h = min(H, int(W * ah / aw))
+            w, h = max(2, w // 2 * 2), max(2, h // 2 * 2)
+            fx, fy = p.get("anchor", (0.5, 0.5))
+            x, y = int((W - w) * fx), int((H - h) * fy)
+        else:
+            x, y, w, h = (int(p[k]) for k in ("x", "y", "w", "h"))
+        ffmpeg.run(["-i", inputs[0], "-vf", f"crop={w}:{h}:{x}:{y},setsar=1", *self._venc(), "-c:a", "copy", out])
+
+    def _op_still(self, node: Node, inputs, out: Path) -> None:
+        t = float(node.params["at"])
+        ffmpeg.run(["-ss", f"{t:.3f}", "-i", inputs[0], "-frames:v", "1", out])
+
+    def _op_subtitles(self, node: Node, inputs, out: Path) -> None:
+        p = node.params
+        if not ffmpeg.has_filter("subtitles"):
+            raise ffmpeg.RenderError(["ffmpeg"], "this ffmpeg build lacks the subtitles filter (needs libass)")
+        path = str(p["path"]).replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
+        vf = f"subtitles='{path}'"
+        if p.get("style"):
+            vf += ":force_style='" + str(p["style"]).replace("'", "\\'") + "'"
+        ffmpeg.run(["-i", inputs[0], "-vf", vf, *self._venc(), "-c:a", "copy", out])
 
     def _op_speed(self, node: Node, inputs, out: Path) -> None:
         f = float(node.params["factor"])

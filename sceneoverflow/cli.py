@@ -244,6 +244,29 @@ def cmd_studio(a) -> int:
     return 0
 
 
+_STARTER = '''"""Edit script. Run:  sceneoverflow studio edit.py   (or: sceneoverflow run edit.py -o out.mp4)"""
+from sceneoverflow import edit
+
+
+@edit
+def edit(videos, sounds, pictures):
+    v = videos[0]
+    # v = v.remove(*v.silences())             # drop dead air
+    # v = v.with_audio(sounds[0], gain=0.3)   # music bed
+    return v
+'''
+
+
+def cmd_init(a) -> int:
+    from .integrations import write_project_files
+    written = write_project_files(a.dir, media=a.media, starter=_STARTER, force=a.force)
+    for path, status in written:
+        print(f"{status:8} {path}")
+    print("\nnext: put media files in", Path(a.dir, a.media), "then  sceneoverflow studio edit.py")
+    print("Claude Code in this directory now has the sceneoverflow MCP tools (see CLAUDE.md).")
+    return 0
+
+
 def cmd_mcp(a) -> int:
     from .mcp_server import serve
     serve(media=a.media, cache_dir=a.cache)
@@ -346,6 +369,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-open", action="store_true", help="do not open a browser")
     s.set_defaults(fn=cmd_studio)
 
+    s = sub.add_parser("init", help="set up a project: media/, edit.py, .mcp.json and CLAUDE.md for Claude Code")
+    s.add_argument("dir", nargs="?", default=".")
+    s.add_argument("--media", default="media", help="media directory name (default: media)")
+    s.add_argument("--force", action="store_true", help="overwrite existing files")
+    s.set_defaults(fn=cmd_init)
+
     s = sub.add_parser("mcp", help="serve the agent tools over MCP (stdio)")
     s.add_argument("--media")
     s.add_argument("--cache")
@@ -363,7 +392,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     a = build_parser().parse_args(argv)
-    if a.cmd not in ("api", "cache", "mark") and not ffmpeg.available():
+    if a.cmd not in ("api", "cache", "mark", "init") and not ffmpeg.available():
         return _err("ffmpeg and ffprobe must be on PATH")
     try:
         return a.fn(a)

@@ -200,12 +200,35 @@ under the segments. Click the timeline to seek; "insert at cursor" drops the pla
 time into the script as a literal. "copy source time" copies the *source file* time under the playhead
 as a literal; "mark…" writes a named marker into the source's sidecar so the script
 can say `.marks["name"]` instead. A failed run shows the error and marks the failing
-line red. The editor highlights Python and the time literals inside strings. Stdlib only:
+line red. The editor highlights Python and the time literals inside strings, and
+completes as you type: methods after a dot (with signature and one-line doc, aware of
+whether the receiver is a clip, a sequence, `videos`, or `project`), parameter names
+inside a call, file names inside `videos["…"]`, marker names inside `.marks["…"]`,
+transition and position names. Tab or Enter accepts, Ctrl+Space opens it. The catalog
+comes from the real classes over `/api/catalog`, so it cannot drift.
+
+![autocomplete popup in the studio editor](docs/images/studio-autocomplete.png)
+
+Stdlib only:
 no extra dependency, no build step. A browser without an H.264
 decoder (some Linux Chromium builds) gets frame-by-frame stills instead of playback;
 seeking and marking still work.
 
 ![the studio: editor, preview, timeline with a hovered segment](docs/images/studio.png)
+
+**Your own editor.** The package ships type hints and a `py.typed` marker. Annotate the
+edit function and VS Code, PyCharm, and friends complete the whole API:
+
+```python
+from sceneoverflow import Clip, MediaList, Project, edit
+
+@edit
+def edit(videos: MediaList, sounds: MediaList, pictures: MediaList, project: Project) -> Clip:
+    ...
+```
+
+`sceneoverflow init` writes the starter that way. `sceneoverflow api --json` prints the
+same catalog the studio uses, for tooling of your own.
 
 **Jupyter.** A clip's `_repr_html_` is a player, a thumbnail strip, and the describe
 table. See `examples/notebook.ipynb`.
@@ -326,7 +349,7 @@ sceneoverflow/
   notebook.py     Jupyter HTML
   render/         cache, ffmpeg wrapper, renderer (one method per op)
   watch.py        watch mode
-  studio/         server.py (stdlib HTTP + SSE + Range) and index.html (vanilla JS)
+  studio/         server.py (stdlib HTTP + SSE + Range), catalog.py (API as data), index.html (vanilla JS)
   agent.py        agent tool functions      mcp_server.py   MCP wrapper
   integrations.py .mcp.json + CLAUDE.md writer for `sceneoverflow init`
   cli.py
@@ -339,7 +362,7 @@ DESIGN.md         the original plan and what changed while building it
 
 ```
 pip install -e '.[dev]'
-pytest                       # 65 tests, ~2-3 min; needs ffmpeg
+pytest                       # 70 tests, ~2-3 min; needs ffmpeg (node for the studio JS tests)
 pytest -m "not ffmpeg"       # pure-python tests only
 ```
 

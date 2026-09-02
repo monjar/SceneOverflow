@@ -33,6 +33,13 @@
   #hl { background:var(--bg); color:var(--fg); overflow:hidden; pointer-events:none; z-index:0 }
   .k { color:#ff7b72 } .s { color:#a5d6ff } .c { color:#8b949e; font-style:italic } .n { color:#f2cc60 }
   .d { color:#d2a8ff } .f { color:#79c0ff } .m { color:#7ee787 } .t { color:#ffa657 } .b { color:#d2a8ff }
+  #ac { position:absolute; z-index:3; display:none; min-width:260px; max-width:calc(100% - 16px); max-height:240px; overflow:auto;
+        background:#262a34; border:1px solid #3a3f4c; border-radius:6px; box-shadow:0 8px 24px #0008; font-size:12px }
+  #ac .hd { padding:5px 10px; color:#c8ccd6; border-bottom:1px solid #3a3f4c; white-space:pre; overflow:hidden; text-overflow:ellipsis }
+  #ac .hd b { color:#ffa657 }
+  #ac .it { padding:4px 10px; cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
+  #ac .it.sel { background:#3a4a7a } #ac .it .l { color:#7ee787 } #ac .it.prop .l { color:#79c0ff } #ac .it.str .l { color:#a5d6ff }
+  #ac .it.par .l { color:#ffa657 } #ac .it .sg { color:#8a8f9c } #ac .it .dc { color:#8a8f9c; margin-left:8px }
   #right { grid-area:right; display:grid; grid-template-rows:minmax(0,1fr) auto; min-height:0 }
   #player { display:flex; flex-direction:column; align-items:center; justify-content:center; padding:10px;
             min-height:0; background:#101115; position:relative }
@@ -61,7 +68,7 @@
     <span class="dim">hover a segment → its line lights up · double-click a segment → jump to the line · click a gutter line → its segments</span>
     <span id="media"></span>
   </div>
-  <div id="editor"><div id="gutter"></div><div id="codewrap"><pre id="hl"></pre><textarea id="code" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea></div></div>
+  <div id="editor"><div id="gutter"></div><div id="codewrap"><pre id="hl"></pre><div id="ac"></div><textarea id="code" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea></div></div>
   <div id="right">
     <div id="player">
       <video id="v" controls preload="auto"></video>
@@ -78,7 +85,7 @@
     </div>
     <div id="tl"><canvas id="c" height="150"></canvas><div id="tip"></div></div>
   </div>
-  <div id="status"><span id="st">connecting…</span><span id="stats"></span><span id="hint"><kbd>Ctrl/Cmd+S</kbd> save · <kbd>click timeline</kbd> seek · <kbd>space</kbd> play/pause</span></div>
+  <div id="status"><span id="st">connecting…</span><span id="stats"></span><span id="hint"><kbd>Ctrl/Cmd+S</kbd> save · <kbd>Ctrl+Space</kbd> complete · <kbd>click timeline</kbd> seek · <kbd>space</kbd> play/pause</span></div>
 </div>
 <script>
 (() => {
@@ -129,6 +136,156 @@
   function renderHighlight() { hl.innerHTML = highlight(code.value); syncScroll(); }
   function syncScroll() { hl.scrollTop = code.scrollTop; hl.scrollLeft = code.scrollLeft; gutter.scrollTop = code.scrollTop; }
 
+  // ---------------- autocomplete: pure logic (tested in node), then the popup
+  // @pure-start
+  const SEQ_METHODS = new Set(['cut', 'split_at', 'drop', 'delete', 'keep', 'map']);
+  function receiverKind(recv) {
+    if (/^(videos|sounds|pictures)$/.test(recv)) return 'medialist';
+    if (recv === 'project') return 'project';
+    if (/\.marks$/.test(recv)) return 'markers';
+    if (/\.words\([^()]*\)$/.test(recv)) return 'transcript';
+    if (/\.(silences|scenes)\([^()]*\)$/.test(recv)) return 'list';
+    if (/(^|\.)(Sequence)\(/.test(recv)) return 'sequence';
+    const calls = [...recv.matchAll(/\.([A-Za-z_]\w*)\(/g)].map(m => m[1]);
+    const last = calls[calls.length - 1];
+    if (last && SEQ_METHODS.has(last) && !/\.join\([^()]*\)\s*$/.test(recv)) return 'sequence';
+    return 'clip';
+  }
+  function trailingExpr(s) {
+    // the expression ending at the end of s: stop at an operator, comma, or unmatched bracket at depth 0
+    let depth = 0, i = s.length - 1, inStr = null;
+    for (; i >= 0; i--) {
+      const ch = s[i];
+      if (inStr) { if (ch === inStr) inStr = null; continue; }
+      if (ch === '"' || ch === "'") { inStr = ch; continue; }
+      if (ch === ')' || ch === ']') depth++;
+      else if (ch === '(' || ch === '[') { if (depth === 0) break; depth--; }
+      else if (depth === 0 && /[\s=,:+\-*\/]/.test(ch)) break;
+    }
+    return s.slice(i + 1);
+  }
+  function openCall(line) {
+    // the innermost unclosed call on this line: {name, argIndex, afterComma}
+    let depth = 0, i = line.length - 1, inStr = null;
+    for (; i >= 0; i--) {
+      const ch = line[i];
+      if (inStr) { if (ch === inStr) inStr = null; continue; }
+      if (ch === '"' || ch === "'") { inStr = ch; continue; }
+      if (ch === ')' || ch === ']') depth++;
+      else if (ch === '(' || ch === '[') { if (depth === 0) break; depth--; }
+    }
+    if (i < 0 || line[i] !== '(') return null;
+    const m = /([A-Za-z_]\w*)\s*$/.exec(line.slice(0, i));
+    if (!m) return null;
+    const args = line.slice(i + 1);
+    return { name: m[1], argIndex: (args.match(/,/g) || []).length, afterComma: /(^|,)\s*[A-Za-z_]*$/.test(args) };
+  }
+  function completionContext(text, pos) {
+    const before = text.slice(0, pos);
+    const line = before.slice(before.lastIndexOf('\n') + 1);
+    let m;
+    if ((m = /(videos|sounds|pictures)\[\s*(["'])([^"'\]]*)$/.exec(line)))
+      return { kind: 'media', list: m[1], prefix: m[3], start: pos - m[3].length, quote: m[2] };
+    if ((m = /\.marks\[\s*(["'])([^"'\]]*)$/.exec(line)))
+      return { kind: 'marker', prefix: m[2], start: pos - m[2].length, quote: m[1] };
+    if ((m = /\b(transition|pos|mode|anchor)\s*=\s*(["'])([^"']*)$/.exec(line)))
+      return { kind: 'enum', param: m[1], prefix: m[3], start: pos - m[3].length, quote: m[2] };
+    if ((m = /((?:[A-Za-z_][\w]*|\)|\]|"|')(?:[\w\]\)\("'.,\s=:-]*?)?)\.([A-Za-z_]\w*)?$/.exec(line)) && !/["']$/.test(m[1] + '.')) {
+      const recv = trailingExpr(m[1].replace(/\s+$/, ''));
+      if (!/["']\s*$/.test(recv) && !/^\d/.test(recv)) {
+        const prefix = m[2] || '';
+        return { kind: 'attr', receiver: recv, cls: receiverKind(recv), prefix, start: pos - prefix.length };
+      }
+    }
+    const call = openCall(line);
+    if (call && call.afterComma) {
+      const w = /[A-Za-z_]\w*$/.exec(line);
+      const prefix = w ? w[0] : '';
+      return { kind: 'param', call: call.name, argIndex: call.argIndex, prefix, start: pos - prefix.length };
+    }
+    return null;
+  }
+  function completions(cat, ctx) {
+    if (!cat || !ctx) return [];
+    const pre = ctx.prefix.toLowerCase();
+    const has = n => n.toLowerCase().startsWith(pre);
+    const strItem = v => ({ label: v, insert: v, cls: 'str', detail: '' });
+    if (ctx.kind === 'media') return (cat.media[ctx.list] || []).filter(has).map(strItem);
+    if (ctx.kind === 'marker') return [...new Set(Object.values(cat.marker_names || {}).flat())].filter(has).map(strItem);
+    if (ctx.kind === 'enum') {
+      const src = { transition: cat.transitions, pos: cat.positions, mode: cat.audio_modes, anchor: ['center', 'left', 'right', 'top', 'bottom'] }[ctx.param] || [];
+      return src.filter(has).map(strItem);
+    }
+    if (ctx.kind === 'attr') {
+      const groups = { medialist: ['medialist', 'sequence'], sequence: ['sequence'], clip: ['clip'], project: ['project'],
+                       markers: ['markers'], transcript: ['transcript'], list: [] }[ctx.cls] || ['clip'];
+      const seen = new Set(), out = [];
+      for (const g of groups) for (const m of (cat[g] || [])) {
+        if (seen.has(m.name) || !has(m.name)) continue;
+        seen.add(m.name);
+        out.push({ label: m.name, insert: m.kind === 'property' ? m.name : m.name + '(' + (m.params.length ? '' : ')'),
+                   cls: m.kind === 'property' ? 'prop' : 'meth', detail: m.sig, doc: m.doc, params: m.params });
+      }
+      return out;
+    }
+    if (ctx.kind === 'param') {
+      const all = ['clip', 'sequence', 'medialist', 'project', 'markers', 'transcript'].flatMap(g => cat[g] || []);
+      const meth = all.find(m => m.name === ctx.call);
+      if (!meth) return [];
+      const items = meth.params.filter(p => !p.name.startsWith('*') && has(p.name))
+        .map(p => ({ label: p.name + '=', insert: p.name + '=', cls: 'par', detail: 'default' in p ? p.default : 'required' }));
+      if (items.length) items.header = meth.name + meth.sig;
+      return items;
+    }
+    return [];
+  }
+  function applyCompletion(text, pos, ctx, item) {
+    let ins = item.insert;
+    if (ctx.quote && text[pos] !== ctx.quote) ins += ctx.quote;
+    return { text: text.slice(0, ctx.start) + ins + text.slice(pos), cursor: ctx.start + ins.length };
+  }
+  // @pure-end
+
+  let catalog = null, acItems = [], acIdx = 0, acCtx = null;
+  const ac = $('ac');
+  fetch('/api/catalog').then(r => r.json()).then(c => { catalog = c; });
+  let charW = 7.8;
+  (() => { const sp = document.createElement('span'); sp.textContent = 'M'.repeat(40); sp.style.cssText = 'position:absolute;visibility:hidden;white-space:pre'; sp.style.font = getComputedStyle(code).font; document.body.appendChild(sp); charW = sp.getBoundingClientRect().width / 40; sp.remove(); })();
+  function caretXY() {
+    const before = code.value.slice(0, code.selectionStart);
+    const lineIdx = (before.match(/\n/g) || []).length, col = before.length - before.lastIndexOf('\n') - 1;
+    return { x: 10 + col * charW - code.scrollLeft, y: 8 + (lineIdx + 1) * 19 - code.scrollTop };
+  }
+  function showAC(force) {
+    const ctx = completionContext(code.value, code.selectionStart);
+    const items = completions(catalog, ctx);
+    if (!items.length || (!force && ctx.kind === 'attr' && !ctx.prefix && ctx.cls === 'list')) return hideAC();
+    acCtx = ctx; acItems = items; acIdx = 0;
+    const { x, y } = caretXY();
+    ac.style.left = Math.max(0, Math.min(x, code.clientWidth - 320)) + 'px'; ac.style.top = y + 'px';
+    renderAC();
+    ac.style.display = 'block';
+  }
+  function renderAC() {
+    let html = acItems.header ? `<div class="hd">${esc(acItems.header).replace(/^(\w+)/, '<b>$1</b>')}</div>` : '';
+    acItems.slice(0, 40).forEach((it, i) => {
+      html += `<div class="it ${it.cls} ${i === acIdx ? 'sel' : ''}" data-i="${i}"><span class="l">${esc(it.label)}</span><span class="sg">${esc(it.detail || '')}</span>${it.doc ? `<span class="dc">${esc(it.doc)}</span>` : ''}</div>`;
+    });
+    ac.innerHTML = html;
+    const sel = ac.querySelector('.sel'); if (sel) sel.scrollIntoView({ block: 'nearest' });
+  }
+  function hideAC() { ac.style.display = 'none'; acItems = []; acCtx = null; }
+  function acceptAC(i = acIdx) {
+    const it = acItems[i]; if (!it || !acCtx) return;
+    const r = applyCompletion(code.value, code.selectionStart, acCtx, it);
+    code.value = r.text; code.setSelectionRange(r.cursor, r.cursor);
+    dirty = true; renderHighlight(); renderGutter(); setStatus();
+    hideAC();
+    if (it.cls === 'meth' && it.params && it.params.length) showAC(true);  // parameter hints right away
+  }
+  ac.addEventListener('mousedown', e => { e.preventDefault(); const it = e.target.closest('.it'); if (it) acceptAC(+it.dataset.i); });
+  code.addEventListener('blur', () => setTimeout(hideAC, 150));
+
   // ---------------- editor
   function renderGutter() {
     const n = code.value.split('\n').length;
@@ -143,13 +300,22 @@
     gutter.innerHTML = html;
     gutter.scrollTop = code.scrollTop;
   }
-  code.addEventListener('scroll', syncScroll);
-  code.addEventListener('input', () => { dirty = true; renderHighlight(); renderGutter(); setStatus(); });
+  code.addEventListener('scroll', () => { syncScroll(); hideAC(); });
+  code.addEventListener('input', e => { dirty = true; renderHighlight(); renderGutter(); setStatus();
+    const ch = e.data || ''; const ctx = completionContext(code.value, code.selectionStart);
+    if (ctx && (ctx.prefix.length >= 1 || '.["\'(,='.includes(ch) || e.inputType === 'deleteContentBackward')) showAC(false); else hideAC(); });
   gutter.addEventListener('click', e => {
     const l = +e.target.dataset.l; pinnedLine = pinnedLine === l ? null : l; renderGutter(); draw();
   });
   code.addEventListener('keydown', e => {
+    if (ac.style.display === 'block') {
+      if (e.key === 'ArrowDown') { e.preventDefault(); acIdx = (acIdx + 1) % acItems.length; renderAC(); return; }
+      if (e.key === 'ArrowUp') { e.preventDefault(); acIdx = (acIdx - 1 + acItems.length) % acItems.length; renderAC(); return; }
+      if (e.key === 'Tab' || e.key === 'Enter') { e.preventDefault(); acceptAC(); return; }
+      if (e.key === 'Escape') { e.preventDefault(); hideAC(); return; }
+    }
     if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); save(); }
+    if (e.ctrlKey && e.key === ' ') { e.preventDefault(); showAC(true); return; }
     if (e.key === 'Tab') { e.preventDefault(); const s = code.selectionStart;
       code.setRangeText('    ', s, code.selectionEnd, 'end'); renderHighlight(); }
   });

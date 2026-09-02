@@ -245,11 +245,11 @@ def cmd_studio(a) -> int:
 
 
 _STARTER = '''"""Edit script. Run:  sceneoverflow studio edit.py   (or: sceneoverflow run edit.py -o out.mp4)"""
-from sceneoverflow import edit
+from sceneoverflow import Clip, MediaList, Project, edit
 
 
 @edit
-def edit(videos, sounds, pictures):
+def edit(videos: MediaList, sounds: MediaList, pictures: MediaList, project: Project) -> Clip:
     v = videos[0]
     # v = v.remove(*v.silences())             # drop dead air
     # v = v.with_audio(sounds[0], gain=0.3)   # music bed
@@ -285,6 +285,10 @@ def cmd_cache(a) -> int:
 
 
 def cmd_api(a) -> int:
+    if a.json:
+        from .studio.catalog import catalog
+        print(json.dumps(catalog(), indent=1))
+        return 0
     print(agent.API_REFERENCE)
     return 0
 
@@ -386,6 +390,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(fn=cmd_cache)
 
     s = sub.add_parser("api", help="print the scripting API cheat sheet")
+    s.add_argument("--json", action="store_true", help="machine-readable catalog of methods and signatures")
     s.set_defaults(fn=cmd_api)
     return p
 

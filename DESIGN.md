@@ -1,5 +1,14 @@
 # SceneOverflow: code-first video editor for programmers and LLM agents
 
+> **Status (2026-09):** Phase 1 (library, CLI, notebook repr, markers CLI) and Phase 2
+> (watch mode, agent tools, MCP server) are implemented and tested. See `README.md`.
+> Phase 3 (the studio) is not started. The design below is the original plan and still
+> describes the architecture as built, with these deviations: the module is `timing.py`
+> not `time.py`; the interactive marker tool drives mpv over its IPC socket from the
+> terminal; final-quality export goes through a full-resolution all-intra mezzanine so
+> the same copy-path pipeline serves preview and final; the MCP server also has
+> `thumbnails`, `set_marker` and `api_reference` tools.
+
 ## Context
 
 Empty repo. Goal: a Python library where the edit is a script, not a GUI session. The unsolved problem the user raised: video is temporal and visual, so a script author cannot know "cut at 12s" without watching. The plan below treats that as the central design problem, not an afterthought. The UI is secondary and phased.

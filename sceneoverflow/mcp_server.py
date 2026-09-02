@@ -13,12 +13,15 @@ from . import agent
 
 
 def build_server(media: str | None = None, cache_dir: str | None = None):
-    try:
-        from mcp.server.fastmcp import FastMCP, Image
+    try:  # mcp >= 2
+        from mcp.server.mcpserver import Image, MCPServer as Server
     except ImportError:
-        raise ImportError("the MCP server needs the mcp package: pip install 'sceneoverflow[mcp]'") from None
+        try:  # mcp 1.x
+            from mcp.server.fastmcp import FastMCP as Server, Image
+        except ImportError:
+            raise ImportError("the MCP server needs the mcp package: pip install 'sceneoverflow[mcp]'") from None
 
-    mcp = FastMCP("sceneoverflow", instructions=agent.API_REFERENCE)
+    mcp = Server("sceneoverflow", instructions=agent.API_REFERENCE)
     default_media = str(Path(media).resolve()) if media else None
 
     def _media(m):

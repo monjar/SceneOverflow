@@ -1,0 +1,254 @@
+# SceneOverflow
+
+Code-first video editing for programmers and LLM agents. The edit is a Python script.
+Times are *anchors* (markers, silences, scene changes, transcript words) instead of
+numbers you had to scrub for. Rendering is a cached op graph on top of ffmpeg, so
+re-running a script after changing one cut re-renders one segment.
+
+```python
+from sceneoverflow import edit
+
+@edit
+def edit(videos, sounds, pictures):
+    talk = videos["talk"]
+    talk = talk.cut("12s", "14s").delete(1).join()          # == talk.remove(("12s", "14s"))
+    talk = talk.with_audio(sounds.join(), mode="mix", gain=0.4)
+    talk = talk.overlay(pictures["logo"], at="0.5s", for_="3s", pos="top-right")
+    talk = talk.text("cut by a script", at="4s", for_="2s", pos="bottom", size=40, box="black@0.5")
+    return talk.fade_in("0.5s").fade_out("1s")
+```
+
+```
+$ sceneoverflow run examples/basic.py -o out.mp4 --png timeline.png
+timeline  00:18.000  video  640x360@30 (preview)
+track    out                     source                                   where
+video    00:00.000-00:12.000     talk.mp4 [00:00.000-00:12.000]           basic.py:9
+video    00:12.000-00:18.000     talk.mp4 [00:14.000-00:20.000]           basic.py:9
+overlay  00:00.500-00:03.500     logo.png (top-right)                     basic.py:14
+text     00:04.000-00:06.000     'cut by a script' (bottom)               basic.py:15
+audio    00:00.000-00:18.000     music.mp3 [00:00.000-00:18.000] (mix x0.40) basic.py:12
+fx       00:00.000-00:00.500     fade in                                  basic.py:16
+fx       00:17.000-00:18.000     fade out                                 basic.py:16
+
+11 rendered, 1 cached, 11.6s -> out.mp4
+```
+
+![timeline of the basic example](docs/images/basic-timeline.png)
+
+Every segment knows which script line made it (`basic.py:9`). That is the link between
+"what I typed" and "what I see".
+
+| `sceneoverflow frame examples/basic.py --at 1.5s` | `--at 5s` |
+|---|---|
+| ![frame at 1.5s: logo overlay](docs/images/basic-frame-logo.jpg) | ![frame at 5s: caption](docs/images/basic-frame-text.jpg) |
+
+`sceneoverflow thumbs examples/basic.py` (nine evenly spaced frames; the source clock
+jumps from 12s to 14s at the cut):
+
+![thumbnail strip](docs/images/basic-thumbs.png)
+
+## Status
+
+Working and tested: the library, the CLI, anchors (markers, silence, scene change,
+optional transcript), the Jupyter representation, watch mode, and an MCP server for
+agents. Not started: the browser studio (design in `DESIGN.md`, Phase 3).
+
+What it is not: a motion-graphics engine (see Remotion), or a GUI. What it is honest
+about: preview re-renders of cut/join edits take well under a second thanks to
+stream-copy on all-intra proxies; anything that touches pixels (overlay, fade, speed,
+text, resize) re-encodes its own span and takes seconds.
+
+## Install
+
+Needs `ffmpeg` and `ffprobe` on `PATH` (any recent build; `drawtext` needs libfreetype,
+which distro packages have).
+
+```
+pip install -e .            # library + CLI, no other dependencies
+pip install -e '.[png]'     # + pillow, for timeline PNGs
+pip install -e '.[mcp]'     # + MCP server for agents
+pip install -e '.[whisper]' # + faster-whisper, for .words()
+```
+
+Then `sceneoverflow run examples/basic.py -o out.mp4` (the example media in
+`examples/media` is synthetic ffmpeg test footage).
+
+## How it works
+
+1. **Everything is an immutable node.** `edit()` never touches files. Every method returns
+   a new clip whose node is `(op, params, inputs)`. The node's content hash names its
+   rendered bytes in `.sceneoverflow/render/`. Same hash, same file, no work.
+2. **Sources are conformed on import** to a *profile*: fixed resolution (scale + pad),
+   constant frame rate, one video stream, one 48 kHz stereo audio stream (silence is
+   injected if the file has none), and all-intra H.264. All-intra means every frame is a
+   keyframe, so `trim` and `join` are `-c copy` and the concat demuxer. No re-encode.
+3. **Preview and final are the same pipeline.** Preview renders from 640x360 proxies.
+   `--mode final` renders from full-resolution mezzanines of the originals, then the
+   last node is encoded once to a delivery file.
+4. **Times are expressions.** `12`, `"12s"`, `"500ms"`, `"1:23.5"`, `"120f"`, a
+   `TimeRef` from an anchor, or a `Span`. Anchors do arithmetic:
+   `talk.marks["intro_end"] + "0.5s"`.
+
+## Anchors: stop typing seconds
+
+```python
+@edit
+def edit(videos, sounds, pictures):
+    talk, broll = videos["talk"], videos["broll"]
+    intro = talk.trim(talk.marks["intro_start"], talk.marks["intro_end"])   # named markers
+    outro = talk.trim(talk.marks["outro"])
+    first_scene = broll.trim(0, broll.scenes()[0])                          # detected scene change
+    body = first_scene.remove(*first_scene.silences(min_len="1s")).speed(1.5)  # detected silence
+    return (intro + body + outro).with_audio(sounds["music"], mode="duck", gain=0.8)
+```
+
+![timeline of the anchors example](docs/images/anchors-timeline.png)
+![thumbnails of the anchors example](docs/images/anchors-thumbs.png)
+
+| Anchor | Where it comes from | Use |
+|---|---|---|
+| `clip.marks["name"]` | `media/<file>.marks.json`, a git-friendly sidecar | `talk.trim(talk.marks["a"], talk.marks["b"])` |
+| `clip.silences(min_len, threshold_db)` | ffmpeg `silencedetect` | `v.remove(*v.silences())` |
+| `clip.scenes(threshold)` | ffmpeg scene score | `v.split_at(*v.scenes())` |
+| `clip.words()` | faster-whisper, word timestamps (optional extra) | `v.trim(v.words().find("let's begin"))`, `.between(a, b)` |
+
+Anchors on a derived clip are in that clip's own time, so
+`talk.trim("2s").silences()` reports positions relative to the trimmed clip.
+
+Setting markers without a GUI:
+
+```
+$ sceneoverflow describe examples/media
+broll.mp4  video  00:08.000  640x360@30  audio
+  silences: 00:03.000-00:05.000
+  scenes: 00:04.000
+talk.mp4  video  00:20.000  640x360@30  audio
+  markers: intro_start=00:01.000, intro_end=00:05.000, outro=00:16.000
+music.mp3  audio  00:30.024
+logo.png  image  120x60
+
+$ sceneoverflow mark media/talk.mp4 --at 1:02.5 --name outro   # by hand
+$ sceneoverflow mark media/talk.mp4 -i                         # opens mpv; type `m outro` while it plays
+```
+
+## Seeing the edit
+
+**Text and JSON.** `clip.describe()` prints the table above; `clip.to_json()` returns
+segments plus the node graph; `sceneoverflow describe script.py --json` does the same
+from the shell. This is what you read back after each change, and what an LLM reads.
+
+**Frames and strips.** `clip.frame_at("12.5s")`, `clip.thumbnails(count=8)`, and the
+`frame` / `thumbs` commands. Look at a moment instead of watching the whole thing.
+
+**Watch mode.** `sceneoverflow watch script.py -o preview.mp4` re-runs the script in a
+subprocess whenever the script or the media changes, rewrites the preview, and prints
+the timeline *diff*. Open `preview.mp4` in any player that reloads on change (mpv,
+VLC, IINA).
+
+![watch mode showing a timeline diff after an edit](docs/images/watch-diff.png)
+
+The first run was served from cache (an earlier `run` had rendered it). The second run
+re-rendered only the second piece, the concat, and the pixel ops downstream of it; the
+`[0s, 12s)` piece, the proxies and the music were cache hits.
+
+**Jupyter.** A clip's `_repr_html_` is a player, a thumbnail strip, and the describe
+table. See `examples/notebook.ipynb`.
+
+```python
+from sceneoverflow import Project
+p = Project("examples/media")
+p.videos["talk"].remove(("2s", "4s")).with_audio(p.sounds[0], gain=0.3)   # renders inline
+```
+
+## For LLM agents
+
+The whole surface is text in and text out, which is what an agent needs:
+
+- `sceneoverflow describe media/ --json` gives durations, markers, silences, scenes and
+  (with `--words`) transcripts.
+- `sceneoverflow api` prints the scripting cheat sheet.
+- `sceneoverflow run script.py --json out.json` returns the timeline; errors point at
+  script lines.
+- `sceneoverflow mcp --media ./media` serves the same as MCP tools over stdio:
+  `analyze`, `run_edit` (inline code or a path), `frame_at` and `thumbnails` (return
+  images, so a vision model can check a moment), `set_marker`, `api_reference`.
+
+Claude Desktop / Claude Code config:
+
+```json
+{ "mcpServers": { "sceneoverflow": { "command": "sceneoverflow", "args": ["mcp", "--media", "/abs/path/media"] } } }
+```
+
+The same functions are importable without MCP: `sceneoverflow.agent.analyze(...)`,
+`run_edit(code=..., media=...)`, `frame_at(...)`.
+
+## API
+
+Clip (video or audio unless noted):
+
+| Method | Effect |
+|---|---|
+| `trim(start, end=None)` / `trim(span)` | keep `[start, end)` |
+| `split_at(*t)`, `cut(*t)` | pieces between cut points, as a `Sequence` |
+| `remove(*spans)`, `keep(*spans)` | delete or keep ranges, joined; spans are `Span` or `(start, end)` |
+| `head(d)`, `tail(d)` | first or last `d` |
+| `a + b` | concatenate |
+| `with_audio(sound, at=0, mode="mix"/"replace"/"duck", gain=1)`, `dub(...)` | add a sound; output keeps the clip's duration |
+| `overlay(image_or_video, at=0, for_=None, pos="top-right", width=None)` | composite; `pos` is a name or `(x, y)` |
+| `text(str, at=0, for_=None, pos="bottom", size=36, color="white", box=None)` | burn a caption |
+| `speed(f)`, `fade_in(d)`, `fade_out(d)`, `fade(d)`, `volume(g)`, `resize(w, h)` | what they say |
+| `.audio` | the audio track as an audio clip |
+| `as_clip(d)` (image) | a still video of duration `d` |
+| `marks`, `silences()`, `scenes()`, `words()` | anchors |
+| `describe()`, `to_json()`, `timeline_png(path)`, `render(path)`, `preview()`, `frame_at(t)`, `thumbnails()` | output |
+
+Sequence: `[i]`, `get(i)`, `drop(*i)` / `delete(*i)`, `keep(*i)`, `map(fn)`, `join()`.
+`videos`, `sounds`, `pictures` are sequences indexed by number or by (partial) file name.
+
+CLI: `run`, `describe`, `mark`, `proxy`, `frame`, `thumbs`, `watch`, `mcp`, `cache`, `api`.
+`sceneoverflow <cmd> -h` for flags.
+
+## Limits, stated plainly
+
+- Cuts are frame-exact on the all-intra intermediates. Audio is re-encoded at cut points
+  so it is sample-exact rather than AAC-frame-aligned.
+- Variable-frame-rate phone footage is forced to constant frame rate on import so the
+  preview and the final agree on where a cut lands.
+- `overlay`, `text`, `fade`, `speed`, `resize` re-encode their span. Long spans cost
+  seconds. Apply them to short trimmed pieces, not to the whole timeline, when iterating.
+- The cache is content addressed and grows without bound. `sceneoverflow cache --clear`.
+- `words()` downloads a whisper model on first use and is CPU-bound.
+- Interactive marking (`mark -i`) needs `mpv` installed.
+
+## Layout
+
+```
+sceneoverflow/
+  timing.py       time literals, TimeRef, Span
+  graph.py        Node: op, params, inputs, content hash, provenance (script line)
+  media.py        ffprobe, Profile, conformance rules
+  anchors.py      markers sidecar, silence/scene detection, transcript
+  clip.py         Clip, Sequence, MediaList (the public API)
+  project.py      Project, @edit, run_script
+  describe.py     timeline as text / JSON / PNG
+  notebook.py     Jupyter HTML
+  render/         cache, ffmpeg wrapper, renderer (one method per op)
+  watch.py        watch mode
+  agent.py        agent tool functions      mcp_server.py   MCP wrapper
+  cli.py
+examples/         basic.py, anchors.py, slideshow.py, notebook.ipynb, media/
+tests/            unit tests (no ffmpeg) and integration tests on synthetic clips
+DESIGN.md         the plan, including the unbuilt Phase 3 studio
+```
+
+## Development
+
+```
+pip install -e '.[dev]'
+pytest                       # 49 tests, ~45s; needs ffmpeg
+pytest -m "not ffmpeg"       # pure-python tests only
+```
+
+The integration tests generate their own footage with ffmpeg's `lavfi` sources and
+assert output durations with ffprobe, a 100% cache-hit rate on a second run, and that
+moving one cut point re-renders exactly two nodes.

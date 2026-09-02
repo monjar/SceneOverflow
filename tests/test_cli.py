@@ -94,3 +94,12 @@ def test_agent_run_edit_inline_and_errors(media_dir, tmp_path):
 def test_module_entrypoint():
     out = subprocess.run([sys.executable, "-m", "sceneoverflow", "api"], capture_output=True, text=True)
     assert out.returncode == 0 and ".with_audio" in out.stdout
+
+
+def test_mcp_server_builds(media_dir):
+    pytest.importorskip("mcp")
+    import asyncio
+    from sceneoverflow.mcp_server import build_server
+    s = build_server(str(media_dir))
+    names = {t.name for t in asyncio.run(s.list_tools())}
+    assert {"analyze", "run_edit", "frame_at", "thumbnails", "set_marker", "api_reference"} <= names

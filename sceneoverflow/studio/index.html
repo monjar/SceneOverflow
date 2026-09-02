@@ -59,6 +59,7 @@
   <div id="right">
     <div id="player">
       <video id="v" controls preload="auto"></video>
+      <img id="still" style="display:none;max-width:100%;max-height:calc(100% - 40px)" alt="frame at playhead">
       <div id="vbar">
         <span class="t" id="tcur">00:00.000</span>
         <button id="copyt" title="copy the playhead time as a literal">copy "12.345s"</button>
@@ -116,17 +117,30 @@
   $('rerun').onclick = () => fetch('/api/rerun', { method: 'POST' });
 
   // ---------------- video
+  // Browsers without an H.264 decoder (some Linux Chromium builds) get stills from /api/frame instead.
+  const still = $('still');
+  const stills = !video.canPlayType('video/mp4; codecs="avc1.42E01E, mp4a.40.2"');
+  let vt = 0;
+  if (stills) { video.style.display = 'none'; still.style.display = 'block'; }
+  const curTime = () => stills ? vt : (video.currentTime || 0);
+  function seek(t) {
+    t = Math.max(0, t);
+    if (stills) { vt = t; still.src = `/api/frame?t=${t.toFixed(3)}s&w=640&r=${state?.run_id || 0}`;
+      $('tcur').textContent = fmt(t); draw(); }
+    else video.currentTime = t;
+  }
   let pendingTime = null;
   video.addEventListener('timeupdate', () => { $('tcur').textContent = fmt(video.currentTime); draw(); });
   video.addEventListener('seeking', draw);
   video.addEventListener('loadedmetadata', () => { if (pendingTime != null) { video.currentTime = Math.min(pendingTime, video.duration || 0); pendingTime = null; } draw(); });
   document.addEventListener('keydown', e => {
     if (e.target === code) return;
-    if (e.key === ' ') { e.preventDefault(); video.paused ? video.play() : video.pause(); }
-    if (e.key === 'ArrowLeft') video.currentTime -= e.shiftKey ? 1 : 1 / 30;
-    if (e.key === 'ArrowRight') video.currentTime += e.shiftKey ? 1 : 1 / 30;
+    if (e.key === ' ' && !stills) { e.preventDefault(); video.paused ? video.play() : video.pause(); }
+    if (e.key === 'ArrowLeft') seek(curTime() - (e.shiftKey ? 1 : 1 / 30));
+    if (e.key === 'ArrowRight') seek(curTime() + (e.shiftKey ? 1 : 1 / 30));
   });
   function loadPreview(url) {
+    if (stills) { seek(Math.min(vt, state?.timeline?.duration || vt)); return; }
     const wasPlaying = !video.paused && !video.ended;
     pendingTime = video.currentTime || 0;
     // a real frame while the new file loads (and if the browser cannot decode H.264 at all)
@@ -135,16 +149,16 @@
     if (wasPlaying) video.play().catch(() => {});
   }
   function segUnderPlayhead() {
-    const t = video.currentTime;
+    const t = curTime();
     return (state?.timeline?.segments || []).find(s => s.track === 'video' && t >= s.out_start && t < s.out_end);
   }
   function sourceTime() {
     const s = segUnderPlayhead();
     if (!s || s.src_start == null) return null;
-    return { file: s.source, t: s.src_start + (video.currentTime - s.out_start) * s.rate };
+    return { file: s.source, t: s.src_start + (curTime() - s.out_start) * s.rate };
   }
   const copy = txt => navigator.clipboard.writeText(txt).then(() => flash('copied ' + txt));
-  $('copyt').onclick = () => copy(`"${video.currentTime.toFixed(3)}s"`);
+  $('copyt').onclick = () => copy(`"${curTime().toFixed(3)}s"`);
   $('copysrc').onclick = () => { const s = sourceTime(); s ? copy(`"${s.t.toFixed(3)}s"`) : flash('no source under playhead'); };
   $('mark').onclick = async () => {
     const s = sourceTime(); if (!s) return flash('no source clip under the playhead');
@@ -168,7 +182,7 @@
     lanes.sort((a, b) => (ORDER[a.track] ?? 9) - (ORDER[b.track] ?? 9));
   }
   const L = 64, ROW = 26, GAP = 4, TOP = 18;
-  function geom() { const dur = Math.max(state?.timeline?.duration || video.duration || 1, 1e-6);
+  function geom() { const dur = Math.max(state?.timeline?.duration || (stills ? 0 : video.duration) || 1, 1e-6);
     const w = canvas.clientWidth - L - 12; return { dur, x: t => L + t / dur * w, t: x => (x - L) / w * dur }; }
   function draw() {
     const dpr = devicePixelRatio || 1;
@@ -204,7 +218,7 @@
         }
       }
     });
-    const px = g.x(video.currentTime || 0);
+    const px = g.x(curTime());
     ctx.fillStyle = '#ff5f57'; ctx.fillRect(px - 1, TOP - 8, 2, h - TOP - 6);
     ctx.beginPath(); ctx.moveTo(px - 6, TOP - 8); ctx.lineTo(px + 6, TOP - 8); ctx.lineTo(px, TOP - 1); ctx.fill();
   }
@@ -225,7 +239,7 @@
     else tip.style.display = 'none';
   });
   canvas.addEventListener('mouseleave', () => { hoverSeg = null; tip.style.display = 'none'; renderGutter(); draw(); });
-  canvas.addEventListener('click', ev => { const g = geom(); video.currentTime = Math.max(0, Math.min(g.dur, g.t(ev.clientX - canvas.getBoundingClientRect().left))); });
+  canvas.addEventListener('click', ev => { const g = geom(); seek(Math.min(g.dur, g.t(ev.clientX - canvas.getBoundingClientRect().left))); });
   new ResizeObserver(draw).observe($('tl'));
 
   // ---------------- status + media

@@ -159,7 +159,9 @@ gutter; click a gutter line and its segments light up on the timeline. Click the
 timeline to seek. "copy source time" copies the *source file* time under the playhead
 as a literal; "mark…" writes a named marker into the source's sidecar so the script
 can say `.marks["name"]` instead. A failed run shows the error and marks the failing
-line red. Stdlib only: no extra dependency, no build step.
+line red. Stdlib only: no extra dependency, no build step. A browser without an H.264
+decoder (some Linux Chromium builds) gets frame-by-frame stills instead of playback;
+seeking and marking still work.
 
 ![the studio: editor, preview, timeline with a hovered segment](docs/images/studio.png)
 

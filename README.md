@@ -50,8 +50,8 @@ jumps from 12s to 14s at the cut):
 ## Status
 
 Working and tested: the library, the CLI, anchors (markers, silence, scene change,
-optional transcript), the Jupyter representation, watch mode, and an MCP server for
-agents. Not started: the browser studio (design in `DESIGN.md`, Phase 3).
+optional transcript), the Jupyter representation, watch mode, an MCP server for
+agents, and the browser studio (editor, preview, timeline, live on save).
 
 What it is not: a motion-graphics engine (see Remotion), or a GUI. What it is honest
 about: preview re-renders of cut/join edits take well under a second thanks to
@@ -151,6 +151,18 @@ The first run was served from cache (an earlier `run` had rendered it). The seco
 re-rendered only the second piece, the concat, and the pixel ops downstream of it; the
 `[0s, 12s)` piece, the proxies and the music were cache hits.
 
+**Studio.** `sceneoverflow studio script.py` opens a local page with the script, the
+preview and the timeline. Save (Ctrl/Cmd+S) re-runs the script and pushes the new
+timeline and video to the page over Server-Sent Events. The link between code and
+picture goes both ways: hover a segment and the line that made it lights up in the
+gutter; click a gutter line and its segments light up on the timeline. Click the
+timeline to seek. "copy source time" copies the *source file* time under the playhead
+as a literal; "mark…" writes a named marker into the source's sidecar so the script
+can say `.marks["name"]` instead. A failed run shows the error and marks the failing
+line red. Stdlib only: no extra dependency, no build step.
+
+![the studio: editor, preview, timeline with a hovered segment](docs/images/studio.png)
+
 **Jupyter.** A clip's `_repr_html_` is a player, a thumbnail strip, and the describe
 table. See `examples/notebook.ipynb`.
 
@@ -205,7 +217,7 @@ Clip (video or audio unless noted):
 Sequence: `[i]`, `get(i)`, `drop(*i)` / `delete(*i)`, `keep(*i)`, `map(fn)`, `join()`.
 `videos`, `sounds`, `pictures` are sequences indexed by number or by (partial) file name.
 
-CLI: `run`, `describe`, `mark`, `proxy`, `frame`, `thumbs`, `watch`, `mcp`, `cache`, `api`.
+CLI: `run`, `describe`, `mark`, `proxy`, `frame`, `thumbs`, `watch`, `studio`, `mcp`, `cache`, `api`.
 `sceneoverflow <cmd> -h` for flags.
 
 ## Limits, stated plainly
@@ -218,7 +230,10 @@ CLI: `run`, `describe`, `mark`, `proxy`, `frame`, `thumbs`, `watch`, `mcp`, `cac
   seconds. Apply them to short trimmed pieces, not to the whole timeline, when iterating.
 - The cache is content addressed and grows without bound. `sceneoverflow cache --clear`.
 - `words()` downloads a whisper model on first use and is CPU-bound.
-- Interactive marking (`mark -i`) needs `mpv` installed.
+- Interactive marking (`mark -i`) needs `mpv` installed. The studio does the same in
+  the browser without it.
+- The studio runs the script in a subprocess per change and serves on localhost only.
+  It has no auth; do not bind it to a public interface.
 
 ## Layout
 
@@ -234,18 +249,19 @@ sceneoverflow/
   notebook.py     Jupyter HTML
   render/         cache, ffmpeg wrapper, renderer (one method per op)
   watch.py        watch mode
+  studio/         server.py (stdlib HTTP + SSE + Range) and index.html (vanilla JS)
   agent.py        agent tool functions      mcp_server.py   MCP wrapper
   cli.py
 examples/         basic.py, anchors.py, slideshow.py, notebook.ipynb, media/
 tests/            unit tests (no ffmpeg) and integration tests on synthetic clips
-DESIGN.md         the plan, including the unbuilt Phase 3 studio
+DESIGN.md         the original plan and what changed while building it
 ```
 
 ## Development
 
 ```
 pip install -e '.[dev]'
-pytest                       # 49 tests, ~45s; needs ffmpeg
+pytest                       # 55 tests, ~2 min; needs ffmpeg
 pytest -m "not ffmpeg"       # pure-python tests only
 ```
 

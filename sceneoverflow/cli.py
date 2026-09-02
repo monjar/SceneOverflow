@@ -226,6 +226,24 @@ def cmd_watch(a) -> int:
     return 0
 
 
+def cmd_studio(a) -> int:
+    from .studio import StudioServer
+    media = _media_arg(a.script, a.media)
+    srv = StudioServer(a.script, media, cache_dir=a.cache, host=a.host, port=a.port, mode=a.mode)
+    srv.start()
+    print(f"studio at {srv.url}   (ctrl-c to stop)")
+    if not a.no_open:
+        import webbrowser
+        webbrowser.open(srv.url)
+    try:
+        srv.wait()
+    except KeyboardInterrupt:
+        print()
+    finally:
+        srv.stop()
+    return 0
+
+
 def cmd_mcp(a) -> int:
     from .mcp_server import serve
     serve(media=a.media, cache_dir=a.cache)
@@ -319,6 +337,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--once", action="store_true", help="run once and exit (for scripting/tests)")
     s.set_defaults(fn=cmd_watch)
 
+    s = sub.add_parser("studio", help="open the browser studio: editor, preview and timeline, live on save")
+    s.add_argument("script")
+    common(s)
+    s.add_argument("--port", type=int, default=8765)
+    s.add_argument("--host", default="127.0.0.1")
+    s.add_argument("--mode", choices=("preview", "final"), default="preview")
+    s.add_argument("--no-open", action="store_true", help="do not open a browser")
+    s.set_defaults(fn=cmd_studio)
+
     s = sub.add_parser("mcp", help="serve the agent tools over MCP (stdio)")
     s.add_argument("--media")
     s.add_argument("--cache")
@@ -341,4 +368,7 @@ def main(argv=None) -> int:
     try:
         return a.fn(a)
     except (MediaError, TimeError, ffmpeg.RenderError, FileNotFoundError, KeyError, ValueError) as e:
+        if os.environ.get("SCENEOVERFLOW_TRACEBACK"):  # watch/studio want the script line numbers
+            import traceback
+            traceback.print_exc()
         return _err(str(e))

@@ -18,13 +18,13 @@ def _snapshot(script: Path, media: Path) -> dict[str, float]:
     snap = {str(script): script.stat().st_mtime}
     for p in media.iterdir():
         if p.is_file() and not p.name.startswith("."):
-            snap[str(p)] = p.stat().st_mtime
+            snap[str(p)] = p.stat().st_mtime  # media files and their *.marks.json sidecars
     return snap
 
 
 def run_once(script: Path, media: Path, out: Path | None, png: Path | None, mode: str,
              cache_dir: Path | None, timeout: float | None = None) -> dict:
-    """One run in a subprocess. Returns ``{"ok", "describe", "seconds", "log"}``."""
+    """One run in a subprocess. Returns ``{"ok", "describe", "timeline", "seconds", "log"}``."""
     with_json = Path(str(out or script) + ".timeline.json")
     cmd = [sys.executable, "-m", "sceneoverflow", "run", str(script), "--media", str(media),
            "--mode", mode, "--json", str(with_json), "--quiet"]
@@ -35,20 +35,23 @@ def run_once(script: Path, media: Path, out: Path | None, png: Path | None, mode
     if cache_dir:
         cmd += ["--cache", str(cache_dir)]
     t0 = time.time()
+    env = dict(os.environ, SCENEOVERFLOW_TRACEBACK="1")
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
     except subprocess.TimeoutExpired:
-        return {"ok": False, "describe": "", "seconds": time.time() - t0,
+        return {"ok": False, "describe": "", "timeline": None, "seconds": time.time() - t0,
                 "log": f"timed out after {timeout}s (infinite loop in the script?)"}
     dt = time.time() - t0
     if p.returncode != 0:
-        return {"ok": False, "describe": "", "seconds": dt, "log": (p.stderr or p.stdout).strip()}
-    desc = ""
+        return {"ok": False, "describe": "", "timeline": None, "seconds": dt,
+                "log": (p.stderr or p.stdout).strip()}
+    desc, timeline = "", None
     if with_json.exists():
         with open(with_json) as f:
-            desc = json.load(f).get("describe", "")
+            data = json.load(f)
+        desc, timeline = data.get("describe", ""), data.get("timeline")
         with_json.unlink(missing_ok=True)
-    return {"ok": True, "describe": desc, "seconds": dt, "log": p.stdout.strip()}
+    return {"ok": True, "describe": desc, "timeline": timeline, "seconds": dt, "log": p.stdout.strip()}
 
 
 def watch(script: str | Path, media: str | Path, out: str | Path | None = None, png: str | Path | None = None,

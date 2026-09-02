@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SceneOverflow studio</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg:#1a1c22; --panel:#22252d; --line:#2f333d; --fg:#d8dae0; --dim:#8a8f9c; --acc:#4c84ff;
+          --ok:#2eb878; --err:#ff5f57; --warn:#ffbd2e; --hl:#3a4a7a; }
+  * { box-sizing:border-box }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+              font:13px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace }
+  #app { display:grid; height:100%; grid-template-columns:minmax(360px,42%) 1fr;
+         grid-template-rows:38px 1fr 34px; grid-template-areas:"top top" "editor right" "status status" }
+  #top { grid-area:top; display:flex; align-items:center; gap:10px; padding:0 12px; background:var(--panel);
+         border-bottom:1px solid var(--line) }
+  #top b { color:#fff } #top .dim { color:var(--dim) }
+  button { background:#2b3040; color:var(--fg); border:1px solid var(--line); border-radius:4px;
+           padding:4px 10px; font:inherit; cursor:pointer }
+  button:hover { border-color:var(--acc) } button.primary { background:var(--acc); color:#fff; border-color:var(--acc) }
+  #editor { grid-area:editor; display:flex; min-height:0; border-right:1px solid var(--line) }
+  #gutter { width:46px; overflow:hidden; background:var(--panel); color:var(--dim); text-align:right;
+            padding:8px 6px 8px 0; user-select:none; flex:none }
+  #gutter div { height:19px; line-height:19px; padding-right:4px; border-radius:3px 0 0 3px; cursor:pointer }
+  #gutter div.hl { background:var(--hl); color:#fff }
+  #gutter div.err { background:var(--err); color:#fff }
+  #gutter div.has { color:#b7bccb }
+  #code { flex:1; resize:none; border:0; outline:0; margin:0; padding:8px 10px; background:var(--bg);
+          color:var(--fg); font:inherit; line-height:19px; white-space:pre; overflow:auto; tab-size:4 }
+  #right { grid-area:right; display:grid; grid-template-rows:minmax(0,1fr) auto; min-height:0 }
+  #player { display:flex; flex-direction:column; align-items:center; justify-content:center; padding:10px;
+            min-height:0; background:#101115; position:relative }
+  video { max-width:100%; max-height:100%; background:#000; outline:0 }
+  #vbar { display:flex; gap:8px; align-items:center; margin-top:8px; color:var(--dim) }
+  #vbar .t { color:#fff; min-width:9ch }
+  #tl { position:relative; border-top:1px solid var(--line); background:var(--panel) }
+  canvas { display:block; width:100%; cursor:crosshair }
+  #tip { position:absolute; pointer-events:none; background:#000c; color:#fff; padding:4px 8px; border-radius:4px;
+         white-space:pre; display:none; z-index:2; font-size:12px }
+  #status { grid-area:status; display:flex; align-items:center; gap:14px; padding:0 12px; background:var(--panel);
+            border-top:1px solid var(--line); color:var(--dim); overflow:hidden; white-space:nowrap }
+  #status .ok { color:var(--ok) } #status .err { color:var(--err) } #status .run { color:var(--warn) }
+  #log { position:absolute; left:0; right:0; bottom:0; max-height:45%; overflow:auto; background:#2a1416;
+         color:#ffd7d5; padding:8px 12px; white-space:pre-wrap; border-top:1px solid var(--err); display:none }
+  #media { margin-left:auto; color:var(--dim) } #media span { margin-left:10px }
+  kbd { border:1px solid var(--line); border-radius:3px; padding:0 4px; color:var(--dim) }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="top">
+    <b>SceneOverflow</b> <span class="dim" id="scriptname">…</span>
+    <button class="primary" id="save" title="Ctrl/Cmd+S">save &amp; run</button>
+    <button id="rerun" title="re-run without saving">re-run</button>
+    <span class="dim">hover the timeline to see which line made a segment · click a gutter line to see its segments</span>
+    <span id="media"></span>
+  </div>
+  <div id="editor"><div id="gutter"></div><textarea id="code" spellcheck="false"></textarea></div>
+  <div id="right">
+    <div id="player">
+      <video id="v" controls preload="auto"></video>
+      <div id="vbar">
+        <span class="t" id="tcur">00:00.000</span>
+        <button id="copyt" title="copy the playhead time as a literal">copy "12.345s"</button>
+        <button id="copysrc" title="copy the *source* file time under the playhead">copy source time</button>
+        <button id="mark" title="add a named marker to the source file under the playhead">mark…</button>
+        <span id="frameinfo"></span>
+      </div>
+      <pre id="log"></pre>
+    </div>
+    <div id="tl"><canvas id="c" height="150"></canvas><div id="tip"></div></div>
+  </div>
+  <div id="status"><span id="st">connecting…</span><span id="stats"></span><span id="hint"><kbd>Ctrl/Cmd+S</kbd> save · <kbd>click timeline</kbd> seek · <kbd>space</kbd> play/pause</span></div>
+</div>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const code = $('code'), gutter = $('gutter'), video = $('v'), canvas = $('c'), tip = $('tip');
+  const COLORS = { video:'#4c84ff', audio:'#2eb878', overlay:'#ffaa3c', text:'#c878ff', fx:'#7a7f8c' };
+  const ORDER = { video:0, overlay:1, text:2, audio:3, fx:4 };
+  let state = null, lanes = [], hoverSeg = null, pinnedLine = null, dirty = false, lastRun = 0;
+
+  const fmt = t => { t = Math.max(0, t || 0); const m = Math.floor(t / 60), s = t - m * 60;
+    return String(m).padStart(2, '0') + ':' + s.toFixed(3).padStart(6, '0'); };
+  const lineOf = where => { const m = /:(\d+)$/.exec(where || ''); return m ? +m[1] : null; };
+
+  // ---------------- editor
+  function renderGutter() {
+    const n = code.value.split('\n').length;
+    const lines = new Set((state?.timeline?.segments || []).map(s => lineOf(s.where)).filter(Boolean));
+    const errs = new Set(state?.error_lines || []);
+    let html = '';
+    for (let i = 1; i <= n; i++) {
+      const cls = [lines.has(i) ? 'has' : '', errs.has(i) ? 'err' : '',
+                   (hoverSeg && lineOf(hoverSeg.where) === i) || pinnedLine === i ? 'hl' : ''].join(' ');
+      html += `<div class="${cls}" data-l="${i}">${i}</div>`;
+    }
+    gutter.innerHTML = html;
+    gutter.scrollTop = code.scrollTop;
+  }
+  code.addEventListener('scroll', () => gutter.scrollTop = code.scrollTop);
+  code.addEventListener('input', () => { dirty = true; renderGutter(); setStatus(); });
+  gutter.addEventListener('click', e => {
+    const l = +e.target.dataset.l; pinnedLine = pinnedLine === l ? null : l; renderGutter(); draw();
+  });
+  code.addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); save(); }
+    if (e.key === 'Tab') { e.preventDefault(); const s = code.selectionStart;
+      code.setRangeText('    ', s, code.selectionEnd, 'end'); }
+  });
+  async function save() {
+    await fetch('/api/script', { method: 'PUT', body: code.value });
+    dirty = false; setStatus();
+  }
+  $('save').onclick = save;
+  $('rerun').onclick = () => fetch('/api/rerun', { method: 'POST' });
+
+  // ---------------- video
+  let pendingTime = null;
+  video.addEventListener('timeupdate', () => { $('tcur').textContent = fmt(video.currentTime); draw(); });
+  video.addEventListener('seeking', draw);
+  video.addEventListener('loadedmetadata', () => { if (pendingTime != null) { video.currentTime = Math.min(pendingTime, video.duration || 0); pendingTime = null; } draw(); });
+  document.addEventListener('keydown', e => {
+    if (e.target === code) return;
+    if (e.key === ' ') { e.preventDefault(); video.paused ? video.play() : video.pause(); }
+    if (e.key === 'ArrowLeft') video.currentTime -= e.shiftKey ? 1 : 1 / 30;
+    if (e.key === 'ArrowRight') video.currentTime += e.shiftKey ? 1 : 1 / 30;
+  });
+  function loadPreview(url) {
+    const wasPlaying = !video.paused && !video.ended;
+    pendingTime = video.currentTime || 0;
+    video.src = url;
+    if (wasPlaying) video.play().catch(() => {});
+  }
+  function segUnderPlayhead() {
+    const t = video.currentTime;
+    return (state?.timeline?.segments || []).find(s => s.track === 'video' && t >= s.out_start && t < s.out_end);
+  }
+  function sourceTime() {
+    const s = segUnderPlayhead();
+    if (!s || s.src_start == null) return null;
+    return { file: s.source, t: s.src_start + (video.currentTime - s.out_start) * s.rate };
+  }
+  const copy = txt => navigator.clipboard.writeText(txt).then(() => flash('copied ' + txt));
+  $('copyt').onclick = () => copy(`"${video.currentTime.toFixed(3)}s"`);
+  $('copysrc').onclick = () => { const s = sourceTime(); s ? copy(`"${s.t.toFixed(3)}s"`) : flash('no source under playhead'); };
+  $('mark').onclick = async () => {
+    const s = sourceTime(); if (!s) return flash('no source clip under the playhead');
+    const name = prompt(`marker name on ${s.file} at ${fmt(s.t)}`); if (!name) return;
+    const r = await fetch('/api/mark', { method: 'POST', body: JSON.stringify({ file: s.file, name, t: s.t }) });
+    const j = await r.json();
+    flash(j.ok ? `${s.file}.marks.json: ${name} = ${fmt(s.t)}  →  use .marks["${name}"]` : j.error);
+    loadMedia();
+  };
+  let flashT; function flash(msg) { $('frameinfo').textContent = msg; clearTimeout(flashT); flashT = setTimeout(() => $('frameinfo').textContent = '', 4000); }
+
+  // ---------------- timeline
+  function layout() {
+    const segs = (state?.timeline?.segments || []).slice().sort((a, b) => (ORDER[a.track] ?? 9) - (ORDER[b.track] ?? 9) || a.out_start - b.out_start);
+    lanes = [];
+    for (const s of segs) {
+      let lane = lanes.find(l => l.track === s.track && l.segs[l.segs.length - 1].out_end <= s.out_start + 1e-6);
+      if (!lane) { lane = { track: s.track, segs: [] }; lanes.push(lane); }
+      lane.segs.push(s);
+    }
+    lanes.sort((a, b) => (ORDER[a.track] ?? 9) - (ORDER[b.track] ?? 9));
+  }
+  const L = 64, ROW = 26, GAP = 4, TOP = 18;
+  function geom() { const dur = Math.max(state?.timeline?.duration || video.duration || 1, 1e-6);
+    const w = canvas.clientWidth - L - 12; return { dur, x: t => L + t / dur * w, t: x => (x - L) / w * dur }; }
+  function draw() {
+    const dpr = devicePixelRatio || 1;
+    const h = TOP + lanes.length * (ROW + GAP) + 20;
+    canvas.style.height = h + 'px';
+    if (canvas.width !== canvas.clientWidth * dpr || canvas.height !== h * dpr) { canvas.width = canvas.clientWidth * dpr; canvas.height = h * dpr; }
+    const ctx = canvas.getContext('2d'); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, canvas.clientWidth, h);
+    if (!state?.timeline) { ctx.fillStyle = '#8a8f9c'; ctx.fillText(state?.error ? 'last run failed; showing nothing' : 'waiting for first run…', L, 30); return; }
+    const g = geom();
+    let step = 1; while (g.dur / step > 30) step *= step < 10 ? 2 : 1.5;
+    ctx.font = '11px ui-monospace,monospace';
+    for (let t = 0; t <= g.dur + 1e-6; t += step) {
+      ctx.fillStyle = '#2f333d'; ctx.fillRect(g.x(t), TOP - 4, 1, h - TOP - 14);
+      ctx.fillStyle = '#8a8f9c'; ctx.fillText(fmt(t).slice(0, step >= 1 ? -4 : 7), g.x(t) + 3, h - 6);
+    }
+    lanes.forEach((lane, i) => {
+      const y = TOP + i * (ROW + GAP);
+      ctx.fillStyle = '#c8ccd6'; ctx.fillText(lane.track, 8, y + 17);
+      for (const s of lane.segs) {
+        const x0 = g.x(s.out_start), x1 = Math.max(g.x(s.out_end), x0 + 2);
+        const on = s === hoverSeg || (pinnedLine && lineOf(s.where) === pinnedLine);
+        ctx.fillStyle = COLORS[s.track] || '#777'; ctx.globalAlpha = on ? 1 : 0.8;
+        ctx.fillRect(x0, y, x1 - x0, ROW); ctx.globalAlpha = 1;
+        if (on) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.strokeRect(x0 + 1, y + 1, x1 - x0 - 2, ROW - 2); }
+        if (x1 - x0 > 40) {
+          ctx.save(); ctx.beginPath(); ctx.rect(x0 + 2, y, x1 - x0 - 4, ROW); ctx.clip();
+          ctx.fillStyle = '#0b0d12';
+          let label = s.source + (s.src_start != null ? ` ${fmt(s.src_start).slice(0, -4)}-${fmt(s.src_end).slice(0, -4)}` : '');
+          ctx.fillText(label, x0 + 4, y + 11);
+          ctx.fillStyle = '#20242e'; ctx.fillText((s.note ? s.note + ' · ' : '') + s.where, x0 + 4, y + 22);
+          ctx.restore();
+        }
+      }
+    });
+    const px = g.x(video.currentTime || 0);
+    ctx.fillStyle = '#ff5f57'; ctx.fillRect(px - 1, TOP - 8, 2, h - TOP - 6);
+    ctx.beginPath(); ctx.moveTo(px - 6, TOP - 8); ctx.lineTo(px + 6, TOP - 8); ctx.lineTo(px, TOP - 1); ctx.fill();
+  }
+  function hit(ev) {
+    const r = canvas.getBoundingClientRect(), x = ev.clientX - r.left, y = ev.clientY - r.top;
+    const i = Math.floor((y - TOP) / (ROW + GAP)); if (i < 0 || i >= lanes.length) return null;
+    const g = geom(), t = g.t(x);
+    return lanes[i].segs.find(s => t >= s.out_start && t <= s.out_end) || null;
+  }
+  canvas.addEventListener('mousemove', ev => {
+    const s = hit(ev); if (s !== hoverSeg) { hoverSeg = s; renderGutter(); draw(); }
+    if (s) { tip.style.display = 'block'; tip.style.left = (ev.offsetX + 14) + 'px'; tip.style.top = (ev.offsetY + 14) + 'px';
+      tip.textContent = `${s.track}  ${fmt(s.out_start)}-${fmt(s.out_end)}\n${s.source}` +
+        (s.src_start != null ? ` [${fmt(s.src_start)}-${fmt(s.src_end)}]${Math.abs(s.rate - 1) > 1e-6 ? ' x' + s.rate : ''}` : '') +
+        (s.note ? `\n${s.note}` : '') + `\n→ ${s.where}`; }
+    else tip.style.display = 'none';
+  });
+  canvas.addEventListener('mouseleave', () => { hoverSeg = null; tip.style.display = 'none'; renderGutter(); draw(); });
+  canvas.addEventListener('click', ev => { const g = geom(); video.currentTime = Math.max(0, Math.min(g.dur, g.t(ev.clientX - canvas.getBoundingClientRect().left))); });
+  new ResizeObserver(draw).observe($('tl'));
+
+  // ---------------- status + media
+  function setStatus() {
+    const st = $('st');
+    if (!state) return;
+    if (state.running) st.innerHTML = '<span class="run">● running…</span>';
+    else if (state.ok) st.innerHTML = `<span class="ok">● ok</span> run #${state.run_id} in ${state.seconds.toFixed(1)}s`;
+    else st.innerHTML = `<span class="err">● failed</span> ${escape(state.error || '')}`;
+    $('stats').textContent = (dirty ? 'unsaved changes · ' : '') + (state.timeline ? `${fmt(state.timeline.duration)} · ${state.timeline.segments.length} segments` : '');
+    $('log').style.display = state.ok || state.running ? 'none' : 'block';
+    $('log').textContent = state.ok ? '' : state.log;
+  }
+  const escape = s => s.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+  async function loadMedia() {
+    const files = await (await fetch('/api/media')).json();
+    $('media').innerHTML = files.map(f => `<span title="${escape(JSON.stringify(f.markers))}">${escape(f.name)}${f.kind !== 'image' ? ' ' + fmt(f.duration).slice(0, -4) : ''}${Object.keys(f.markers).length ? ' ⚑' + Object.keys(f.markers).length : ''}</span>`).join('');
+  }
+
+  // ---------------- boot
+  async function boot() {
+    code.value = await (await fetch('/api/script')).text();
+    loadMedia();
+    const es = new EventSource('/events');
+    es.addEventListener('update', ev => {
+      state = JSON.parse(ev.data);
+      $('scriptname').textContent = state.script + '  ·  ' + state.media;
+      if (state.ok && state.run_id !== lastRun) { lastRun = state.run_id; layout(); loadPreview(state.preview); }
+      renderGutter(); draw(); setStatus();
+    });
+    es.onerror = () => { $('st').innerHTML = '<span class="err">● disconnected</span> (is the studio still running?)'; };
+    renderGutter();
+  }
+  boot();
+})();
+</script>
+</body>
+</html>

@@ -1,9 +1,11 @@
 # SceneOverflow: code-first video editor for programmers and LLM agents
 
-> **Status (2026-09):** Phase 1 (library, CLI, notebook repr, markers CLI) and Phase 2
-> (watch mode, agent tools, MCP server) are implemented and tested. See `README.md`.
-> Phase 3 (the studio) is not started. The design below is the original plan and still
-> describes the architecture as built, with these deviations: the module is `timing.py`
+> **Status (2026-09):** Phases 1, 2 and 3 are implemented and tested. See `README.md`.
+> The design below is the original plan and still describes the architecture as built,
+> with these deviations: the studio uses stdlib `http.server` with Server-Sent Events
+> and a single vanilla-JS page instead of FastAPI + websockets + a framework, so the
+> package stays dependency-free; the studio runs the script in a subprocess (as
+> planned) and additionally serves frames, a media list, and a marker endpoint; the module is `timing.py`
 > not `time.py`; the interactive marker tool drives mpv over its IPC socket from the
 > terminal; final-quality export goes through a full-resolution all-intra mezzanine so
 > the same copy-path pipeline serves preview and final; the MCP server also has
